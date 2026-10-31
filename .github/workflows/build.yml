@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -30,6 +30,9 @@ jobs:
           cp native/MainActivity.kt build_app/android/app/src/main/kotlin/com/example/hdr_player/MainActivity.kt
           # Ask Android to render the window in HDR color mode
           sed -i '0,/<activity/s//<activity android:colorMode="hdr"/' build_app/android/app/src/main/AndroidManifest.xml
+          # MediaFormat color keys + HDR static info need API 24
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/; s/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/' build_app/android/app/build.gradle*
+          grep -n "minSdk" build_app/android/app/build.gradle*
 
       - name: Test
         working-directory: build_app
@@ -39,7 +42,12 @@ jobs:
 
       - name: Build APK
         working-directory: build_app
-        run: flutter build apk --release
+        run: |
+          set -o pipefail
+          flutter build apk --release 2>&1 | tee build.log || {
+            grep -iE "^e: |error|went wrong|Could not|Execution failed|>" build.log | head -8 | cut -c1-400 | while IFS= read -r l; do echo "::error::$l"; done
+            exit 1
+          }
 
       - uses: actions/upload-artifact@v4
         with:
