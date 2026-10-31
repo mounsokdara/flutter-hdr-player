@@ -25,6 +25,17 @@ class HdrPlayerApp extends StatelessWidget {
       );
 }
 
+enum PlayMode {
+  auto('Auto'),
+  exo('ExoPlayer'),
+  mpvCopy('mpv copy'),
+  mpvZero('mpv zero-copy'),
+  mpvSoft('mpv software');
+
+  final String label;
+  const PlayMode(this.label);
+}
+
 class PlayerPage extends StatefulWidget {
   const PlayerPage({super.key});
   @override
@@ -34,6 +45,8 @@ class PlayerPage extends StatefulWidget {
 class _PlayerPageState extends State<PlayerPage> {
   static const _channel = MethodChannel('hdr_probe');
 
+  String? _path;
+  PlayMode _mode = PlayMode.auto;
   VideoPlayerController? _controller;
   Player? _mkPlayer;
   VideoController? _mkController;
@@ -63,65 +76,97 @@ class _PlayerPageState extends State<PlayerPage> {
     await p?.dispose();
   }
 
-  Future<void> _open(String path) async {
+  Future<void> _open(String path, {PlayMode? mode}) async {
+    _path = path;
+    if (mode != null) _mode = mode;
     setState(() {
       _loading = true;
       _error = null;
     });
     await _disposePlayers();
-    try {
-      final map = await _channel.invokeMapMethod<dynamic, dynamic>('probe', {'path': path});
-      final info = VideoColorInfo.fromMap(map ?? {});
-      setState(() {
-        _info = info;
-        _verdict = classifyHdr(info);
-      });
-    } catch (e) {
-      setState(() => _error = 'Probe failed: $e');
+    if (_info == null || mode == null) {
+      try {
+        final map = await _channel.invokeMapMethod<dynamic, dynamic>('probe', {'path': path});
+        final info = VideoColorInfo.fromMap(map ?? {});
+        setState(() {
+          _info = info;
+          _verdict = classifyHdr(info);
+        });
+      } catch (e) {
+        setState(() => _error = 'Probe failed: $e');
+      }
     }
 
-    // 1) ExoPlayer (video_player)
-    String? exoError;
     try {
-      final c = VideoPlayerController.file(File(path));
-      await c.initialize();
-      // initialize() can succeed and the renderer fail right after; listen once.
-      c.addListener(() {
-        if (c.value.hasError && mounted && _controller == c) {
-          _fallback(path, c.value.errorDescription ?? 'unknown');
-        }
-      });
-      await c.setLooping(true);
-      await c.play();
-      setState(() {
-        _controller = c;
-        _engine = 'ExoPlayer';
-      });
+      switch (_mode) {
+        case PlayMode.auto:
+          try {
+            await _startExo(path);
+          } catch (e) {
+            await _startMpv(path, 'mediacodec-copy', exoError: e is PlatformException ? (e.message ?? '$e') : '$e');
+          }
+        case PlayMode.exo:
+          await _startExo(path);
+        case PlayMode.mpvCopy:
+          await _startMpv(path, 'mediacodec-copy');
+        case PlayMode.mpvZero:
+          await _startMpv(path, 'mediacodec');
+        case PlayMode.mpvSoft:
+          await _startMpv(path, 'no');
+      }
     } catch (e) {
-      exoError = e is PlatformException ? (e.message ?? '$e') : '$e';
-      await _fallback(path, exoError);
+      setState(() => _error = 'Playback failed: ${e is PlatformException ? e.message : e}');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
 
-  // 2) libmpv + MediaCodec (no ExoPlayer level check)
-  Future<void> _fallback(String path, String exoError) async {
-    await _disposePlayers();
-    try {
-      final p = Player();
-      final vc = VideoController(p);
-      await p.open(Media(path));
-      setState(() {
-        _mkPlayer = p;
-        _mkController = vc;
-        _engine = 'libmpv (fallback)';
-        _error = null;
-      });
-    } catch (e) {
-      setState(() => _error = 'ExoPlayer failed: ${exoError.split("\n").first}\nFallback failed: $e');
-    }
+  Future<void> _startExo(String path) async {
+    final c = VideoPlayerController.file(File(path));
+    await c.initialize();
+    c.addListener(() {
+      if (c.value.hasError && mounted && _controller == c && _mode == PlayMode.auto) {
+        _startMpv(path, 'mediacodec-copy', exoError: c.value.errorDescription ?? 'unknown');
+      }
+    });
+    await c.setLooping(true);
+    await c.play();
+    setState(() {
+      _controller = c;
+      _engine = 'ExoPlayer';
+    });
   }
+
+  Future<void> _startMpv(String path, String hwdec, {String? exoError}) async {
+    await _disposePlayers();
+    final p = Player();
+    final vc = VideoController(
+      p,
+      configuration: VideoControllerConfiguration(
+        enableHardwareAcceleration: hwdec != 'no',
+        hwdec: hwdec == 'no' ? null : hwdec,
+      ),
+    );
+    await p.open(Media(path));
+    setState(() {
+      _mkPlayer = p;
+      _mkController = vc;
+      _engine = 'libmpv · ${hwdec == "no" ? "software decode" : hwdec}';
+      _error = exoError == null ? null : 'ExoPlayer rejected it (${exoError.split("\n").first}); using libmpv.';
+    });
+  }
+
+  Widget _modeBar() => Wrap(
+        spacing: 6,
+        children: [
+          for (final m in PlayMode.values)
+            ChoiceChip(
+              label: Text(m.label),
+              selected: _mode == m,
+              onSelected: (_loading || _path == null) ? null : (_) => _open(_path!, mode: m),
+            ),
+        ],
+      );
 
   @override
   void dispose() {
@@ -168,6 +213,7 @@ class _PlayerPageState extends State<PlayerPage> {
               aspectRatio: (i != null && i.width > 0 && i.height > 0) ? i.width / i.height : 16 / 9,
               child: Video(controller: _mkController!),
             ),
+          if (_path != null) Padding(padding: const EdgeInsets.only(top: 8), child: _modeBar()),
           if (_engine != null) Padding(padding: const EdgeInsets.only(top: 4), child: Text('Engine: $_engine', style: const TextStyle(color: Colors.white60))),
           if (v != null && i != null) ...[
             const SizedBox(height: 8),
