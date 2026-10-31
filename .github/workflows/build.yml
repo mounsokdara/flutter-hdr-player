@@ -1,0 +1,47 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate Android scaffold
+        run: |
+          flutter create --org com.example --project-name hdr_player --platforms=android build_app
+          rm -rf build_app/lib build_app/test
+          cp -r lib test pubspec.yaml build_app/
+          mkdir -p build_app/android/app/src/main/kotlin/com/example/hdr_player
+          cp native/MainActivity.kt build_app/android/app/src/main/kotlin/com/example/hdr_player/MainActivity.kt
+          # Ask Android to render the window in HDR color mode
+          sed -i '0,/<activity/s//<activity android:colorMode="hdr"/' build_app/android/app/src/main/AndroidManifest.xml
+
+      - name: Test
+        working-directory: build_app
+        run: |
+          flutter pub get
+          flutter test
+
+      - name: Build APK
+        working-directory: build_app
+        run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hdr-player-apk
+          path: build_app/build/app/outputs/flutter-apk/app-release.apk
