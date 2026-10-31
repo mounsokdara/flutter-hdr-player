@@ -44,7 +44,7 @@ jobs:
         working-directory: build_app
         run: |
           set -o pipefail
-          flutter build apk --release 2>&1 | tee build.log || {
+          flutter build apk --release --split-per-abi --no-shrink 2>&1 | tee build.log || {
             sed -n '/What went wrong/,/Try:/p' build.log | head -25 | cut -c1-300 | while IFS= read -r l; do echo "::error::$l"; done
             exit 1
           }
@@ -52,4 +52,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: hdr-player-apk
-          path: build_app/build/app/outputs/flutter-apk/app-release.apk
+          path: build_app/build/app/outputs/flutter-apk/*-release.apk

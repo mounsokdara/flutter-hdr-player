@@ -3,11 +3,17 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:media_kit/media_kit.dart';
+import 'package:media_kit_video/media_kit_video.dart';
 import 'package:video_player/video_player.dart';
 
 import 'hdr_classifier.dart';
 
-void main() => runApp(const HdrPlayerApp());
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  MediaKit.ensureInitialized();
+  runApp(const HdrPlayerApp());
+}
 
 class HdrPlayerApp extends StatelessWidget {
   const HdrPlayerApp({super.key});
@@ -29,6 +35,9 @@ class _PlayerPageState extends State<PlayerPage> {
   static const _channel = MethodChannel('hdr_probe');
 
   VideoPlayerController? _controller;
+  Player? _mkPlayer;
+  VideoController? _mkController;
+  String? _engine; // 'ExoPlayer' or 'libmpv (fallback)'
   VideoColorInfo? _info;
   HdrVerdict? _verdict;
   String? _error;
@@ -41,48 +50,83 @@ class _PlayerPageState extends State<PlayerPage> {
     await _open(path);
   }
 
+  Future<void> _disposePlayers() async {
+    final c = _controller;
+    final p = _mkPlayer;
+    setState(() {
+      _controller = null;
+      _mkPlayer = null;
+      _mkController = null;
+      _engine = null;
+    });
+    await c?.dispose();
+    await p?.dispose();
+  }
+
   Future<void> _open(String path) async {
     setState(() {
       _loading = true;
       _error = null;
     });
+    await _disposePlayers();
     try {
       final map = await _channel.invokeMapMethod<dynamic, dynamic>('probe', {'path': path});
       final info = VideoColorInfo.fromMap(map ?? {});
-      // Show metadata even if playback later fails.
       setState(() {
         _info = info;
         _verdict = classifyHdr(info);
       });
-      final old = _controller;
+    } catch (e) {
+      setState(() => _error = 'Probe failed: $e');
+    }
+
+    // 1) ExoPlayer (video_player)
+    String? exoError;
+    try {
       final c = VideoPlayerController.file(File(path));
       await c.initialize();
+      // initialize() can succeed and the renderer fail right after; listen once.
+      c.addListener(() {
+        if (c.value.hasError && mounted && _controller == c) {
+          _fallback(path, c.value.errorDescription ?? 'unknown');
+        }
+      });
       await c.setLooping(true);
       await c.play();
-      await old?.dispose();
-      setState(() => _controller = c);
-    } catch (e) {
-      final i = _info;
-      final hint = (i != null && !i.decoderSupported)
-          ? 'Your device decoder (${i.decoderName.isEmpty ? "none" : i.decoderName}) supports at most '
-              '${i.decoderMaxFps.toStringAsFixed(0)} fps at ${i.width}×${i.height}, '
-              'but this video is ${i.frameRate.toStringAsFixed(0)} fps. '
-              'Re-encode to ≤${i.decoderMaxFps > 0 ? i.decoderMaxFps.toStringAsFixed(0) : "60"} fps '
-              '(e.g. ffmpeg -i in.mp4 -vf fps=60 -c:v libx265 -pix_fmt yuv420p10le -tag:v hvc1 '
-              '-color_primaries bt2020 -color_trc arib-std-b67 -colorspace bt2020nc out.mp4).'
-          : '';
       setState(() {
-        _controller = null;
-        _error = 'Playback failed: ${e is PlatformException ? e.message : e}\n$hint';
+        _controller = c;
+        _engine = 'ExoPlayer';
       });
+    } catch (e) {
+      exoError = e is PlatformException ? (e.message ?? '$e') : '$e';
+      await _fallback(path, exoError);
     } finally {
-      setState(() => _loading = false);
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  // 2) libmpv + MediaCodec (no ExoPlayer level check)
+  Future<void> _fallback(String path, String exoError) async {
+    await _disposePlayers();
+    try {
+      final p = Player();
+      final vc = VideoController(p);
+      await p.open(Media(path));
+      setState(() {
+        _mkPlayer = p;
+        _mkController = vc;
+        _engine = 'libmpv (fallback)';
+        _error = null;
+      });
+    } catch (e) {
+      setState(() => _error = 'ExoPlayer failed: ${exoError.split("\n").first}\nFallback failed: $e');
     }
   }
 
   @override
   void dispose() {
     _controller?.dispose();
+    _mkPlayer?.dispose();
     super.dispose();
   }
 
@@ -119,6 +163,12 @@ class _PlayerPageState extends State<PlayerPage> {
               ),
             ]),
           ],
+          if (_mkController != null)
+            AspectRatio(
+              aspectRatio: (i != null && i.width > 0 && i.height > 0) ? i.width / i.height : 16 / 9,
+              child: Video(controller: _mkController!),
+            ),
+          if (_engine != null) Padding(padding: const EdgeInsets.only(top: 4), child: Text('Engine: $_engine', style: const TextStyle(color: Colors.white60))),
           if (v != null && i != null) ...[
             const SizedBox(height: 8),
             Chip(
