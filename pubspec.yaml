@@ -10,7 +10,7 @@ dependencies:
   flutter:
     sdk: flutter
   video_player: ^2.9.2
-  file_picker: ^8.1.2
+  file_picker: ^10.0.0
 
 dev_dependencies:
   flutter_test:
