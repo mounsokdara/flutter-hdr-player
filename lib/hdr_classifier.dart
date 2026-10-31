@@ -42,6 +42,10 @@ class VideoColorInfo {
   final double maxLuminance; // mastering display max, cd/m2 (0 = unknown)
   final double maxCll;
   final double maxFall;
+  final double frameRate;
+  final bool decoderSupported;
+  final double decoderMaxFps;
+  final String decoderName;
 
   const VideoColorInfo({
     this.mime = '',
@@ -55,6 +59,10 @@ class VideoColorInfo {
     this.maxLuminance = 0,
     this.maxCll = 0,
     this.maxFall = 0,
+    this.frameRate = 0,
+    this.decoderSupported = true,
+    this.decoderMaxFps = 0,
+    this.decoderName = '',
   });
 
   factory VideoColorInfo.fromMap(Map<dynamic, dynamic> m) => VideoColorInfo(
@@ -69,6 +77,10 @@ class VideoColorInfo {
         maxLuminance: ((m['maxLuminance'] ?? 0) as num).toDouble(),
         maxCll: ((m['maxCll'] ?? 0) as num).toDouble(),
         maxFall: ((m['maxFall'] ?? 0) as num).toDouble(),
+        frameRate: ((m['frameRate'] ?? 0) as num).toDouble(),
+        decoderSupported: (m['decoderSupported'] ?? true) as bool,
+        decoderMaxFps: ((m['decoderMaxFps'] ?? 0) as num).toDouble(),
+        decoderName: (m['decoderName'] ?? '') as String,
       );
 
   double get peakNits => maxLuminance > maxCll ? maxLuminance : maxCll;

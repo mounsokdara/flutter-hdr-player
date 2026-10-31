@@ -49,19 +49,32 @@ class _PlayerPageState extends State<PlayerPage> {
     try {
       final map = await _channel.invokeMapMethod<dynamic, dynamic>('probe', {'path': path});
       final info = VideoColorInfo.fromMap(map ?? {});
+      // Show metadata even if playback later fails.
+      setState(() {
+        _info = info;
+        _verdict = classifyHdr(info);
+      });
       final old = _controller;
       final c = VideoPlayerController.file(File(path));
       await c.initialize();
       await c.setLooping(true);
       await c.play();
       await old?.dispose();
-      setState(() {
-        _controller = c;
-        _info = info;
-        _verdict = classifyHdr(info);
-      });
+      setState(() => _controller = c);
     } catch (e) {
-      setState(() => _error = '$e');
+      final i = _info;
+      final hint = (i != null && !i.decoderSupported)
+          ? 'Your device decoder (${i.decoderName.isEmpty ? "none" : i.decoderName}) supports at most '
+              '${i.decoderMaxFps.toStringAsFixed(0)} fps at ${i.width}×${i.height}, '
+              'but this video is ${i.frameRate.toStringAsFixed(0)} fps. '
+              'Re-encode to ≤${i.decoderMaxFps > 0 ? i.decoderMaxFps.toStringAsFixed(0) : "60"} fps '
+              '(e.g. ffmpeg -i in.mp4 -vf fps=60 -c:v libx265 -pix_fmt yuv420p10le -tag:v hvc1 '
+              '-color_primaries bt2020 -color_trc arib-std-b67 -colorspace bt2020nc out.mp4).'
+          : '';
+      setState(() {
+        _controller = null;
+        _error = 'Playback failed: ${e is PlatformException ? e.message : e}\n$hint';
+      });
     } finally {
       setState(() => _loading = false);
     }
@@ -117,6 +130,8 @@ class _PlayerPageState extends State<PlayerPage> {
             const Divider(height: 24),
             _row('Codec', i.mime),
             _row('Resolution', '${i.width}×${i.height}'),
+            _row('Frame rate', i.frameRate > 0 ? '${i.frameRate.toStringAsFixed(1)} fps' : 'n/a'),
+            _row('HW decoder', i.decoderSupported ? 'OK (${i.decoderName})' : 'Cannot decode this size/fps (max ${i.decoderMaxFps.toStringAsFixed(0)} fps)'),
             _row('Primaries', standardName(i.colorStandard)),
             _row('Transfer', transferName(i.colorTransfer)),
             _row('Range', rangeName(i.colorRange)),

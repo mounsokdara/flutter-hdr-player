@@ -1,6 +1,7 @@
 package com.example.hdr_player
 
 import android.media.MediaExtractor
+import android.media.MediaCodecList
 import android.media.MediaFormat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -53,7 +54,15 @@ class MainActivity : FlutterActivity() {
                 maxFall = (b.getShort(23).toInt() and 0xFFFF).toDouble()
             }
         }
+        val w = intOrNull(f, MediaFormat.KEY_WIDTH) ?: 0
+        val h = intOrNull(f, MediaFormat.KEY_HEIGHT) ?: 0
+        val fps = frameRate(f)
+        val dec = decoderCheck(mime, w, h, fps)
         return mapOf(
+            "frameRate" to fps,
+            "decoderSupported" to dec.first,
+            "decoderMaxFps" to dec.second,
+            "decoderName" to dec.third,
             "mime" to mime,
             "width" to (intOrNull(f, MediaFormat.KEY_WIDTH) ?: 0),
             "height" to (intOrNull(f, MediaFormat.KEY_HEIGHT) ?: 0),
@@ -66,6 +75,28 @@ class MainActivity : FlutterActivity() {
             "maxCll" to maxCll,
             "maxFall" to maxFall,
         )
+    }
+
+    private fun frameRate(f: MediaFormat): Double {
+        if (!f.containsKey(MediaFormat.KEY_FRAME_RATE)) return 0.0
+        return try { f.getInteger(MediaFormat.KEY_FRAME_RATE).toDouble() }
+        catch (e: Exception) { try { f.getFloat(MediaFormat.KEY_FRAME_RATE).toDouble() } catch (e2: Exception) { 0.0 } }
+    }
+
+    // Does any hardware decoder on this device accept size + frame rate?
+    private fun decoderCheck(mime: String, w: Int, h: Int, fps: Double): Triple<Boolean, Double, String> {
+        var best = 0.0
+        var name = ""
+        for (info in MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos) {
+            if (info.isEncoder || !info.supportedTypes.any { it.equals(mime, true) }) continue
+            val vc = info.getCapabilitiesForType(mime).videoCapabilities ?: continue
+            try {
+                val maxFps = vc.getSupportedFrameRatesFor(w, h).upper
+                if (maxFps > best) { best = maxFps; name = info.name }
+                if (fps <= 0 || vc.areSizeAndRateSupported(w, h, fps)) return Triple(true, maxFps, info.name)
+            } catch (e: Exception) { /* size unsupported by this codec */ }
+        }
+        return Triple(false, best, name)
     }
 
     // Derive bit depth from codec profile (MediaExtractor doesn't expose it directly).
