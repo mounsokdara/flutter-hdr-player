@@ -333,12 +333,47 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
         if (Build.VERSION.SDK_INT >= 29) i.isSoftwareOnly
         else i.name.startsWith("OMX.google.") || i.name.startsWith("c2.android.")
 
+    /**
+     * Vendor decoders sometimes reject a stream's full format (frame-rate hints, profile/level,
+     * colour keys) with an opaque configure error. Try: the full format, then only the
+     * essentials plus colour/HDR keys, then only the bare essentials.
+     */
+    private fun configVariants(f: MediaFormat, mime: String): List<MediaFormat> {
+        if (!mime.startsWith("video/")) return listOf(f)
+        val w = f.getInteger(MediaFormat.KEY_WIDTH)
+        val h = f.getInteger(MediaFormat.KEY_HEIGHT)
+        fun essentials(withColor: Boolean): MediaFormat {
+            val m = MediaFormat.createVideoFormat(mime, w, h)
+            for (k in listOf("csd-0", "csd-1", "csd-2")) {
+                if (f.containsKey(k)) m.setByteBuffer(k, f.getByteBuffer(k)!!.duplicate())
+            }
+            for (k in listOf(MediaFormat.KEY_MAX_INPUT_SIZE, MediaFormat.KEY_ROTATION)) {
+                if (f.containsKey(k)) m.setInteger(k, f.getInteger(k))
+            }
+            if (withColor) {
+                for (k in listOf(
+                    MediaFormat.KEY_COLOR_STANDARD,
+                    MediaFormat.KEY_COLOR_TRANSFER,
+                    MediaFormat.KEY_COLOR_RANGE
+                )) {
+                    if (f.containsKey(k)) m.setInteger(k, f.getInteger(k))
+                }
+                if (f.containsKey(MediaFormat.KEY_HDR_STATIC_INFO)) {
+                    m.setByteBuffer(MediaFormat.KEY_HDR_STATIC_INFO, f.getByteBuffer(MediaFormat.KEY_HDR_STATIC_INFO)!!.duplicate())
+                }
+            }
+            return m
+        }
+        return listOf(f, essentials(true), essentials(false))
+    }
+
+    private var decoderKey = ""
+    private var decoderNote = ""
+
     private fun createDecoder(f: MediaFormat, s: Surface?): MediaCodec {
         val mime = f.getString(MediaFormat.KEY_MIME) ?: throw IllegalStateException("No mime")
         val candidates = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
-            .filter {
-                !it.isEncoder && it.name !in badDecoders && it.supportedTypes.any { t -> t.equals(mime, true) }
-            }
+            .filter { !it.isEncoder && it.supportedTypes.any { t -> t.equals(mime, true) } }
             .sortedBy { info ->
                 val claims = try {
                     info.getCapabilitiesForType(mime).isFormatSupported(f)
@@ -347,21 +382,28 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
                 }
                 (if (isSoftware(info)) 2 else 0) + (if (claims) 0 else 1)
             }
-        var last: Exception? = null
+        val fails = StringBuilder()
         for (info in candidates) {
-            var c: MediaCodec? = null
-            try {
-                c = MediaCodec.createByCodecName(info.name)
-                c.configure(f, s, null, 0)
-                c.start()
-                decoderName = info.name
-                return c
-            } catch (e: Exception) {
-                last = e
-                quiet { c?.release() }
+            val variants = configVariants(f, mime)
+            for ((idx, fmt) in variants.withIndex()) {
+                val key = "${info.name}#$idx"
+                if (key in badDecoders) continue
+                var c: MediaCodec? = null
+                try {
+                    c = MediaCodec.createByCodecName(info.name)
+                    c.configure(fmt, s, null, 0)
+                    c.start()
+                    decoderName = info.name
+                    decoderKey = key
+                    decoderNote = if (idx == 0) "" else " (relaxed config $idx)"
+                    return c
+                } catch (e: Exception) {
+                    fails.append("\n").append(key).append(": ").append(describe(e))
+                    quiet { c?.release() }
+                }
             }
         }
-        throw IllegalStateException("No decoder could start $mime" + (last?.let { ": " + describe(it) } ?: ""))
+        throw IllegalStateException("No decoder could start $mime$fails")
     }
 
     private fun ensureVideoCodec() {
@@ -376,7 +418,7 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
             disableVideo(e)
             return
         }
-        emit(mapOf("type" to "decoder", "name" to decoderName))
+        emit(mapOf("type" to "decoder", "name" to decoderName + decoderNote))
         quiet { vEx?.seekTo(at, MediaExtractor.SEEK_TO_PREVIOUS_SYNC) }
         skipBeforeUs = at
         vInEos = false; vOutDone = false; pendingV = -1
@@ -386,11 +428,11 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
 
     /** A decoder died mid-stream: remember it and let ensureVideoCodec() pick the next candidate. */
     private fun onVideoError(e: Exception) {
-        val name = decoderName
-        decoderLog.append(name).append(": ").append(describe(e)).append('\n')
-        badDecoders.add(name)
+        val name = decoderKey
+        decoderLog.append(name).append(" (runtime): ").append(describe(e)).append('\n')
+        badDecoders.add(decoderKey)
         dropVideoCodec()
-        emit(mapOf("type" to "error", "message" to "Decoder $name failed (${describe(e)}), trying the next one"))
+        emit(mapOf("type" to "error", "message" to "Decoder $name failed while decoding (${describe(e)}), trying the next one"))
     }
 
     /** No decoder works: keep going audio-only instead of dying. */
