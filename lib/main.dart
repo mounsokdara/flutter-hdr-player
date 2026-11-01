@@ -1,6 +1,5 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:fvp/fvp.dart' as fvp;
 
 import 'background_playback.dart';
 import 'engine/player_engine.dart';
@@ -10,12 +9,7 @@ import 'ui/video_surface.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  // One engine: libmdk. Hardware decode first (MediaCodec), automatic FFmpeg software
-  // fallback after it. No "tunnel" mode, so HDR is tone-mapped by the OpenGL renderer.
-  fvp.registerWith(options: {
-    'platforms': ['android'],
-    'video.decoders': ['AMediaCodec', 'FFmpeg', 'dav1d'],
-  });
+  // Our own engine (native MediaExtractor / MediaCodec / AudioTrack): nothing to register here.
   BackgroundPlayback.init();
   runApp(const HdrPlayerApp());
 }
@@ -80,47 +74,61 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
         builder: (context, _) {
           final v = engine.verdict;
           final i = engine.info;
-          return ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              if (engine.loading) const LinearProgressIndicator(),
-              if (engine.error != null) Text(engine.error!, style: const TextStyle(color: Colors.redAccent)),
-              if (engine.ready) ...[
-                VideoSurface(engine: engine),
-                SeekRow(engine: engine),
-                OptionChips(engine: engine),
-                const Padding(
-                  padding: EdgeInsets.only(top: 6),
-                  child: Text('libmdk · hardware decode → FFmpeg fallback · double-tap ±10 s',
-                      style: TextStyle(color: Colors.white54, fontSize: 12)),
-                ),
-              ],
-              if (v != null && i != null) ...[
-                const SizedBox(height: 12),
-                Chip(
-                  avatar: Icon(v.isHdr ? Icons.hdr_on : Icons.hdr_off),
-                  label: Text(v.label),
-                  backgroundColor: v.isHdr ? Colors.deepOrange.withOpacity(.35) : null,
-                ),
-                Text(v.reason),
-                const Divider(height: 24),
-                _row('Codec', i.mime),
-                _row('Resolution', '${i.width}×${i.height}'),
-                _row('Frame rate', i.frameRate > 0 ? '${i.frameRate.toStringAsFixed(1)} fps' : 'n/a'),
-                _row('Primaries', standardName(i.colorStandard)),
-                _row('Transfer', transferName(i.colorTransfer)),
-                _row('Range', rangeName(i.colorRange)),
-                _row('Bit depth', '${i.bitDepth}-bit'),
-                _row('Mastering peak', i.maxLuminance > 0 ? '${i.maxLuminance.toStringAsFixed(0)} nits' : 'n/a'),
-                _row('MaxCLL / MaxFALL', '${i.maxCll.toStringAsFixed(0)} / ${i.maxFall.toStringAsFixed(0)} nits'),
-              ] else if (!engine.loading && !engine.ready)
-                const Padding(
-                  padding: EdgeInsets.only(top: 80),
-                  child: Center(child: Text('Pick a video to detect HLG / PQ / BT.2020 HDR')),
-                ),
-              const SizedBox(height: 80),
-            ],
-          );
+          // Video + controls stay pinned; only the info list scrolls (a platform view
+          // inside a scrolling list janks).
+          return Column(children: [
+            if (engine.loading) const LinearProgressIndicator(),
+            if (engine.error != null)
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: Text(engine.error!, style: const TextStyle(color: Colors.redAccent)),
+              ),
+            if (engine.ready)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                child: Column(children: [
+                  VideoSurface(engine: engine),
+                  SeekRow(engine: engine),
+                  OptionChips(engine: engine),
+                ]),
+              ),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  if (v != null && i != null) ...[
+                    Chip(
+                      avatar: Icon(v.isHdr ? Icons.hdr_on : Icons.hdr_off),
+                      label: Text(v.label),
+                      backgroundColor: v.isHdr ? Colors.deepOrange.withOpacity(.35) : null,
+                    ),
+                    Text(v.reason),
+                    const Divider(height: 24),
+                    ListenableBuilder(
+                      listenable: engine.video,
+                      builder: (_, __) => _row(
+                          'Decoder', engine.video.value.decoder.isEmpty ? '…' : engine.video.value.decoder),
+                    ),
+                    _row('Codec', i.mime),
+                    _row('Resolution', '${i.width}×${i.height}'),
+                    _row('Frame rate', i.frameRate > 0 ? '${i.frameRate.toStringAsFixed(1)} fps' : 'n/a'),
+                    _row('Primaries', standardName(i.colorStandard)),
+                    _row('Transfer', transferName(i.colorTransfer)),
+                    _row('Range', rangeName(i.colorRange)),
+                    _row('Bit depth', '${i.bitDepth}-bit'),
+                    _row('Mastering peak', i.maxLuminance > 0 ? '${i.maxLuminance.toStringAsFixed(0)} nits' : 'n/a'),
+                    _row('MaxCLL / MaxFALL',
+                        '${i.maxCll.toStringAsFixed(0)} / ${i.maxFall.toStringAsFixed(0)} nits'),
+                  ] else if (!engine.loading && !engine.ready)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 80),
+                      child: Center(child: Text('Pick a video to detect HLG / PQ / BT.2020 HDR')),
+                    ),
+                  const SizedBox(height: 80),
+                ],
+              ),
+            ),
+          ]);
         },
       ),
     );

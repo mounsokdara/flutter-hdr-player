@@ -3,6 +3,7 @@ package com.example.hdr_player
 import android.media.MediaExtractor
 import android.Manifest
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.media.MediaCodecList
 import android.os.Build
@@ -11,6 +12,7 @@ import android.os.Looper
 import android.media.MediaFormat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import java.nio.ByteOrder
 
@@ -65,6 +67,7 @@ class MainActivity : FlutterActivity() {
                 }
             }
         }
+        registerNativePlayer(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "hdr_probe")
             .setMethodCallHandler { call, result ->
                 if (call.method == "probe") {
@@ -75,6 +78,46 @@ class MainActivity : FlutterActivity() {
                     }
                 } else result.notImplemented()
             }
+    }
+
+    private fun registerNativePlayer(engine: FlutterEngine) {
+        val messenger = engine.dartExecutor.binaryMessenger
+        var eventSink: EventChannel.EventSink? = null
+        EventChannel(messenger, "native_player/events").setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(args: Any?, sink: EventChannel.EventSink?) { eventSink = sink }
+            override fun onCancel(args: Any?) { eventSink = null }
+        })
+        val player = NativePlayer(applicationContext) { m -> eventSink?.success(m) }
+        PlayerHolder.player = player
+        engine.platformViewsController.registry.registerViewFactory("native_video_view", VideoViewFactory())
+
+        MethodChannel(messenger, "native_player").setMethodCallHandler { call, result ->
+            val a = (call.arguments as? Map<*, *>) ?: emptyMap<String, Any>()
+            when (call.method) {
+                "open" -> player.open(a["path"] as String) { info, err ->
+                    if (err != null) result.error("OPEN", err, null) else result.success(info)
+                }
+                "play" -> { player.play(); result.success(null) }
+                "pause" -> { player.pause(); result.success(null) }
+                "seek" -> player.seek(
+                    num(a, "positionMs").toLong() * 1000L,
+                    a["accurate"] as? Boolean ?: true
+                ) { result.success(null) }
+                "setSpeed" -> { player.setSpeed(num(a, "value").toFloat()); result.success(null) }
+                "setPitch" -> { player.setPitch(num(a, "value").toFloat()); result.success(null) }
+                "setHdrMode" -> {
+                    val on = a["value"] as? Boolean ?: false
+                    if (Build.VERSION.SDK_INT >= 26) {
+                        runOnUiThread {
+                            window.colorMode = if (on) ActivityInfo.COLOR_MODE_HDR else ActivityInfo.COLOR_MODE_DEFAULT
+                        }
+                    }
+                    result.success(null)
+                }
+                "release" -> { result.success(null) }
+                else -> result.notImplemented()
+            }
+        }
     }
 
     private fun probe(path: String): Map<String, Any?> {

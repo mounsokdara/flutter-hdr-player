@@ -1,9 +1,9 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:video_player/video_player.dart';
 
 import '../engine/player_engine.dart';
+import 'native_video_view.dart';
 
 /// Video + gestures: single tap = play/pause, double-tap left/right = -/+ 10 s
 /// (repeated taps stack: 10, 20, 30 ...).
@@ -38,13 +38,13 @@ class _VideoSurfaceState extends State<VideoSurface> {
 
   @override
   Widget build(BuildContext context) {
-    final c = widget.engine.controller!;
+    final v = widget.engine.video.value;
     return AspectRatio(
-      aspectRatio: c.value.aspectRatio == 0 ? 16 / 9 : c.value.aspectRatio,
+      aspectRatio: v.aspectRatio <= 0 ? 16 / 9 : v.aspectRatio,
       child: LayoutBuilder(builder: (context, box) {
         var downX = 0.0;
         return Stack(fit: StackFit.expand, children: [
-          VideoPlayer(c),
+          const NativeVideoView(),
           GestureDetector(
             behavior: HitTestBehavior.translucent,
             onDoubleTapDown: (d) => downX = d.localPosition.dx,

@@ -27,7 +27,7 @@ jobs:
           rm -rf build_app/lib build_app/test
           cp -r lib test pubspec.yaml build_app/
           mkdir -p build_app/android/app/src/main/kotlin/com/example/hdr_player
-          cp native/MainActivity.kt native/PlaybackService.kt build_app/android/app/src/main/kotlin/com/example/hdr_player/
+          cp native/*.kt build_app/android/app/src/main/kotlin/com/example/hdr_player/
           python3 - <<'PY'
           p = 'build_app/android/app/src/main/AndroidManifest.xml'
           s = open(p).read()
@@ -53,7 +53,7 @@ jobs:
         run: |
           set -o pipefail
           flutter build apk --release --split-per-abi --no-shrink 2>&1 | tee build.log || {
-            sed -n '/What went wrong/,/Try:/p' build.log | head -25 | cut -c1-300 | while IFS= read -r l; do echo "::error::$l"; done
+            { grep -E '^e: ' build.log | head -15; sed -n '/What went wrong/,/Try:/p' build.log | head -12; } | cut -c1-320 | while IFS= read -r l; do echo "::error::$l"; done
             exit 1
           }
 

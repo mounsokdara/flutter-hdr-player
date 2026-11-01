@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../engine/player_engine.dart';
 
-const speeds = <double>[0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0]; // libmdk atempo needs >= 0.5
+const speeds = <double>[0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
 
 String _fmt(Duration d) {
   final h = d.inHours, m = d.inMinutes.remainder(60), s = d.inSeconds.remainder(60);
@@ -18,7 +18,7 @@ class SeekRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: Listenable.merge([engine, engine.controller!]),
+      animation: Listenable.merge([engine, engine.video]),
       builder: (context, _) {
         final dur = engine.duration;
         final durMs = dur.inMilliseconds.toDouble();

@@ -1,30 +1,33 @@
 import 'dart:async';
-import 'dart:io';
-import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-import 'package:fvp/fvp.dart' show FVPControllerExtensions;
-import 'package:video_player/video_player.dart';
 
-import '../audio_filter.dart';
 import '../background_playback.dart';
 import '../hdr_classifier.dart';
+import '../pitch.dart';
+import 'native_video.dart';
 
 const seekStepSeconds = 10;
 
-/// Owns the single libmdk-backed controller and everything around it:
-/// seeking, tempo/pitch, background playback and HDR metadata.
+/// App-level state on top of our native engine: seeking policy, speed/pitch,
+/// background playback and HDR metadata.
 class PlayerEngine extends ChangeNotifier {
   static const _probeChannel = MethodChannel('hdr_probe');
 
   PlayerEngine() {
+    video.onEnded = _onEnded;
+    video.onError = (m) {
+      error = m;
+      notifyListeners();
+    };
+    video.addListener(_onValue);
     BackgroundPlayback.onAction = _onNotificationAction;
     _resync = Timer.periodic(const Duration(seconds: 5), (_) => _bgPush());
   }
 
-  // ---- state ----
-  VideoPlayerController? controller;
+  final NativeVideoController video = NativeVideoController();
+
   String? path;
   String? error;
   bool loading = false;
@@ -36,14 +39,14 @@ class PlayerEngine extends ChangeNotifier {
   double semitones = 0;
   bool backgroundEnabled = true;
 
-  bool get ready => controller?.value.isInitialized ?? false;
-  bool get playing => controller?.value.isPlaying ?? false;
-  Duration get duration => controller?.value.duration ?? Duration.zero;
+  bool get ready => video.value.initialized;
+  bool get playing => video.value.playing;
+  Duration get duration => video.value.duration;
   String get title => path == null ? 'HDR Player' : path!.split('/').last;
   double get pitchFactor => pitchLinked ? speed : semitonesToFactor(semitones);
 
-  /// What the UI should show: the pending seek target if any, else the real position.
-  Duration get position => _target ?? controller?.value.position ?? Duration.zero;
+  /// What the UI shows: the pending seek target if any, else the real position.
+  Duration get position => _target ?? video.value.position;
 
   // ---- seeking: latest target wins, never more than one seek in flight ----
   Duration? _target;
@@ -58,8 +61,8 @@ class PlayerEngine extends ChangeNotifier {
     return d;
   }
 
-  /// Double-tap / notification buttons. Taps in quick succession just move the
-  /// target; one accurate seek runs after the user stops tapping.
+  /// Double-tap / notification buttons. Taps in quick succession just move the target;
+  /// one accurate seek runs after the user stops tapping.
   void nudge(int seconds) {
     if (!ready) return;
     _target = _clamp(position + Duration(seconds: seconds));
@@ -97,19 +100,14 @@ class PlayerEngine extends ChangeNotifier {
   }
 
   Future<void> _drain() async {
-    final c = controller;
-    if (c == null || _seeking) return;
+    if (!ready || _seeking) return;
     _seeking = true;
     try {
       while (_target != null) {
         final t = _target!;
         final fast = _scrubbing;
         try {
-          if (fast) {
-            await c.fastSeekTo(t);
-          } else {
-            await c.seekTo(t);
-          }
+          await video.seek(t, accurate: !fast);
         } catch (_) {}
         if (fast && _scrubbing && _target == t) break; // wait for the next drag update
         if (_target == t && !fast) _target = null;
@@ -122,59 +120,48 @@ class PlayerEngine extends ChangeNotifier {
   }
 
   // ---- transport ----
-  Future<void> play() async {
-    await controller?.play();
-    _bgPush();
-  }
-
-  Future<void> pause() async {
-    await controller?.pause();
-    _bgPush();
-  }
-
+  Future<void> play() => video.play();
+  Future<void> pause() => video.pause();
   Future<void> togglePlay() => playing ? pause() : play();
 
-  // ---- tempo / pitch ----
-  Timer? _audioTimer;
+  void _onEnded() {
+    // loop
+    video.play();
+  }
+
+  // ---- speed / pitch (AudioTrack PlaybackParams in the native engine) ----
+  Timer? _pitchTimer;
 
   Future<void> setSpeed(double v) async {
     speed = v;
     notifyListeners();
-    try {
-      await controller?.setPlaybackSpeed(v);
-    } catch (_) {}
-    _scheduleAudioFilter(); // pitch may follow speed
+    await video.setSpeed(v);
+    if (pitchLinked) _schedulePitch();
     _bgPush();
   }
 
   void setPitchLinked(bool v) {
     pitchLinked = v;
     notifyListeners();
-    _scheduleAudioFilter();
+    _schedulePitch();
   }
 
   void setSemitones(double v) {
     semitones = v;
     notifyListeners();
-    _scheduleAudioFilter();
+    _schedulePitch();
   }
 
   void resetPitch() {
     semitones = 0;
     pitchLinked = false;
     notifyListeners();
-    _scheduleAudioFilter();
+    _schedulePitch();
   }
 
-  void _scheduleAudioFilter() {
-    _audioTimer?.cancel();
-    _audioTimer = Timer(const Duration(milliseconds: 160), _applyAudioFilter);
-  }
-
-  void _applyAudioFilter() {
-    try {
-      controller?.setProperty('audio.avfilter', buildPitchFilter(pitchFactor));
-    } catch (_) {}
+  void _schedulePitch() {
+    _pitchTimer?.cancel();
+    _pitchTimer = Timer(const Duration(milliseconds: 120), () => video.setPitch(pitchFactor));
   }
 
   // ---- open ----
@@ -185,11 +172,7 @@ class PlayerEngine extends ChangeNotifier {
     info = null;
     verdict = null;
     _target = null;
-    final old = controller;
-    controller = null;
     notifyListeners();
-    old?.removeListener(_onValue);
-    await old?.dispose();
 
     try {
       final map = await _probeChannel.invokeMapMethod<dynamic, dynamic>('probe', {'path': file});
@@ -201,14 +184,11 @@ class PlayerEngine extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final c = VideoPlayerController.file(File(file));
-      await c.initialize();
-      await c.setLooping(true);
-      c.addListener(_onValue);
-      controller = c;
-      await c.setPlaybackSpeed(speed);
-      _applyAudioFilter();
-      await c.play();
+      await video.setHdrMode(verdict?.isHdr ?? false);
+      await video.open(file);
+      await video.setSpeed(speed);
+      await video.setPitch(pitchFactor);
+      await video.play();
       _bgStart();
     } catch (e) {
       error = 'Playback failed: ${e is PlatformException ? e.message : e}';
@@ -231,14 +211,12 @@ class PlayerEngine extends ChangeNotifier {
   }
 
   void _bgPush() {
-    final c = controller;
-    if (!backgroundEnabled || !_bgStarted || c == null) return;
+    if (!backgroundEnabled || !_bgStarted || !ready) return;
     BackgroundPlayback.update(title, playing, position, duration, speed);
   }
 
   void _bgStart() {
-    final c = controller;
-    if (!backgroundEnabled || c == null) return;
+    if (!backgroundEnabled || !ready) return;
     _bgStarted = true;
     _lastPlaying = playing;
     BackgroundPlayback.start(title, playing, position, duration, speed);
@@ -276,12 +254,12 @@ class PlayerEngine extends ChangeNotifier {
   @override
   void dispose() {
     _commitTimer?.cancel();
-    _audioTimer?.cancel();
+    _pitchTimer?.cancel();
     _resync?.cancel();
     BackgroundPlayback.onAction = null;
     BackgroundPlayback.stop();
-    controller?.removeListener(_onValue);
-    controller?.dispose();
+    video.removeListener(_onValue);
+    video.dispose();
     super.dispose();
   }
 }
