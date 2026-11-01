@@ -1,15 +1,15 @@
 # HDR Player (Flutter)
 
-Video player that detects HDR and reports why.
+One engine: **libmdk via [fvp](https://pub.dev/packages/fvp)**. It decodes in hardware first (MediaCodec)
+and falls back to FFmpeg software decoders automatically, so odd formats, levels and frame rates play
+without choosing a mode. ExoPlayer and libmpv were removed.
 
-Treated as HDR:
-- Transfer **HLG** or **PQ / SMPTE ST 2084** (this covers **BT.2100**, which is BT.2020 primaries + PQ/HLG)
-- Dolby Vision streams
-- **BT.2020** primaries with **10-bit+** depth **or** a high peak (>= 400 nits, from mastering metadata / MaxCLL)
+HDR detection (`lib/hdr_classifier.dart`, metadata read natively in `native/MainActivity.kt`):
+- Transfer **HLG** or **PQ / ST 2084** (BT.2100 = BT.2020 primaries + one of these)
+- Dolby Vision
+- **BT.2020** primaries with **10-bit+** depth, or a high peak (>= 400 nits)
 
-Color metadata is read natively (`MediaExtractor` -> `MediaFormat`) in `native/MainActivity.kt`,
-classified in `lib/hdr_classifier.dart`, and played with `video_player` (ExoPlayer).
-HDR output needs an HDR-capable display; the manifest sets `android:colorMode="hdr"`.
+Features: background play with media notification (`native/PlaybackService.kt`), double-tap ±10 s,
+speed 0.5-4x (libmdk uses FFmpeg atempo, minimum 0.5), optional pitch shift (FFmpeg rubberband filter).
 
-CI (`.github/workflows/build.yml`) generates the Android scaffold, runs tests, builds a release APK
-and uploads it as the `hdr-player-apk` artifact.
+CI builds per-ABI release APKs and uploads them as the `hdr-player-apk` artifact.
