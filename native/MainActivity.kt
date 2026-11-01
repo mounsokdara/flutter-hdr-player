@@ -1,7 +1,13 @@
 package com.example.hdr_player
 
 import android.media.MediaExtractor
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.MediaCodecList
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.media.MediaFormat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -9,8 +15,56 @@ import io.flutter.plugin.common.MethodChannel
 import java.nio.ByteOrder
 
 class MainActivity : FlutterActivity() {
+    companion object {
+        var bgChannel: MethodChannel? = null
+
+        /** Notification / media-session button -> Dart. */
+        fun emitMedia(action: String, positionMs: Long? = null) {
+            Handler(Looper.getMainLooper()).post {
+                bgChannel?.invokeMethod("media", mapOf("action" to action, "positionMs" to positionMs))
+            }
+        }
+    }
+
+    private fun num(a: Map<*, *>, k: String): Number = (a[k] as? Number) ?: 0
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        bgChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "bg_playback").also { ch ->
+            ch.setMethodCallHandler { call, result ->
+                val a = (call.arguments as? Map<*, *>) ?: emptyMap<String, Any>()
+                when (call.method) {
+                    "start" -> {
+                        if (Build.VERSION.SDK_INT >= 33 &&
+                            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                        ) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 77)
+                        val i = Intent(this, PlaybackService::class.java)
+                            .putExtra("title", a["title"] as? String ?: "Playing")
+                            .putExtra("playing", a["playing"] as? Boolean ?: true)
+                            .putExtra("positionMs", num(a, "positionMs").toLong())
+                            .putExtra("durationMs", num(a, "durationMs").toLong())
+                            .putExtra("speed", num(a, "speed").toFloat().let { if (it <= 0f) 1f else it })
+                        startForegroundService(i)
+                        result.success(null)
+                    }
+                    "update" -> {
+                        PlaybackService.instance?.update(
+                            a["title"] as? String,
+                            a["playing"] as? Boolean ?: true,
+                            num(a, "positionMs").toLong(),
+                            num(a, "durationMs").toLong(),
+                            num(a, "speed").toFloat().let { if (it <= 0f) 1f else it },
+                        )
+                        result.success(null)
+                    }
+                    "stop" -> {
+                        stopService(Intent(this, PlaybackService::class.java))
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+        }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "hdr_probe")
             .setMethodCallHandler { call, result ->
                 if (call.method == "probe") {

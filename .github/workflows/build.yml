@@ -27,7 +27,17 @@ jobs:
           rm -rf build_app/lib build_app/test
           cp -r lib test pubspec.yaml build_app/
           mkdir -p build_app/android/app/src/main/kotlin/com/example/hdr_player
-          cp native/MainActivity.kt build_app/android/app/src/main/kotlin/com/example/hdr_player/MainActivity.kt
+          cp native/MainActivity.kt native/PlaybackService.kt build_app/android/app/src/main/kotlin/com/example/hdr_player/
+          python3 - <<'PY'
+          p = 'build_app/android/app/src/main/AndroidManifest.xml'
+          s = open(p).read()
+          perms = ''.join('<uses-permission android:name="android.permission.%s"/>' % n for n in
+                          ['WAKE_LOCK', 'POST_NOTIFICATIONS', 'FOREGROUND_SERVICE', 'FOREGROUND_SERVICE_MEDIA_PLAYBACK'])
+          s = s.replace('<application', perms + '<application', 1)
+          s = s.replace('</application>', '<service android:name=".PlaybackService" android:exported="false" android:foregroundServiceType="mediaPlayback"/></application>', 1)
+          open(p, 'w').write(s)
+          PY
+          grep -n "PlaybackService\|FOREGROUND" build_app/android/app/src/main/AndroidManifest.xml
           # MediaFormat color keys + HDR static info need API 24
           sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/; s/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/' build_app/android/app/build.gradle*
           grep -n "minSdk" build_app/android/app/build.gradle*
