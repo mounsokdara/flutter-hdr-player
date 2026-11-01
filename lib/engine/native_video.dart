@@ -13,6 +13,8 @@ class NativeVideoValue {
   final bool hasVideo;
   final bool hasAudio;
   final String decoder;
+  final int? textureId;
+  final int quarterTurns;
 
   const NativeVideoValue({
     this.initialized = false,
@@ -23,6 +25,8 @@ class NativeVideoValue {
     this.hasVideo = true,
     this.hasAudio = true,
     this.decoder = '',
+    this.textureId,
+    this.quarterTurns = 0,
   });
 
   NativeVideoValue copyWith({
@@ -34,6 +38,8 @@ class NativeVideoValue {
     bool? hasVideo,
     bool? hasAudio,
     String? decoder,
+    int? textureId,
+    int? quarterTurns,
   }) =>
       NativeVideoValue(
         initialized: initialized ?? this.initialized,
@@ -44,6 +50,8 @@ class NativeVideoValue {
         hasVideo: hasVideo ?? this.hasVideo,
         hasAudio: hasAudio ?? this.hasAudio,
         decoder: decoder ?? this.decoder,
+        textureId: textureId ?? this.textureId,
+        quarterTurns: quarterTurns ?? this.quarterTurns,
       );
 }
 
@@ -87,10 +95,15 @@ class NativeVideoController extends ValueNotifier<NativeVideoValue> {
     final r = await _method.invokeMapMethod<String, dynamic>('open', {'path': path});
     final w = (r?['width'] as num?)?.toInt() ?? 0;
     final h = (r?['height'] as num?)?.toInt() ?? 0;
+    final rot = (((r?['rotation'] as num?)?.toInt() ?? 0) ~/ 90) % 4;
+    final tex = (r?['textureId'] as num?)?.toInt() ?? -1;
+    final odd = rot.isOdd; // 90 / 270 degrees: display is the coded frame turned on its side
     value = NativeVideoValue(
       initialized: true,
       duration: Duration(milliseconds: (r?['durationMs'] as num?)?.toInt() ?? 0),
-      aspectRatio: (w > 0 && h > 0) ? w / h : 16 / 9,
+      aspectRatio: (w > 0 && h > 0) ? (odd ? h / w : w / h) : 16 / 9,
+      textureId: tex >= 0 ? tex : null,
+      quarterTurns: rot,
       hasVideo: r?['hasVideo'] as bool? ?? true,
       hasAudio: r?['hasAudio'] as bool? ?? true,
     );

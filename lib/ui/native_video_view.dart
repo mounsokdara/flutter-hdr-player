@@ -1,33 +1,19 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
-import 'package:flutter/services.dart';
 
-/// Hosts the native SurfaceView (hybrid composition, which SurfaceView needs).
+import '../engine/native_video.dart';
+
+/// Shows the decoder's Flutter texture. The codec's rotation hint is applied here.
 class NativeVideoView extends StatelessWidget {
-  const NativeVideoView({super.key});
-
-  static const viewType = 'native_video_view';
+  final NativeVideoValue value;
+  const NativeVideoView({super.key, required this.value});
 
   @override
   Widget build(BuildContext context) {
-    return PlatformViewLink(
-      viewType: viewType,
-      surfaceFactory: (context, controller) => AndroidViewSurface(
-        controller: controller as AndroidViewController,
-        gestureRecognizers: const {},
-        hitTestBehavior: PlatformViewHitTestBehavior.transparent,
-      ),
-      onCreatePlatformView: (params) {
-        return PlatformViewsService.initExpensiveAndroidView(
-          id: params.id,
-          viewType: viewType,
-          layoutDirection: TextDirection.ltr,
-          creationParamsCodec: const StandardMessageCodec(),
-          onFocus: () => params.onFocusChanged(true),
-        )
-          ..addOnPlatformViewCreatedListener(params.onPlatformViewCreated)
-          ..create();
-      },
+    final id = value.textureId;
+    if (id == null || !value.hasVideo) return const ColoredBox(color: Colors.black);
+    return ColoredBox(
+      color: Colors.black,
+      child: RotatedBox(quarterTurns: value.quarterTurns, child: Texture(textureId: id)),
     );
   }
 }

@@ -18,6 +18,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.view.Surface
+import io.flutter.view.TextureRegistry
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.math.max
@@ -35,7 +36,11 @@ object PlayerHolder {
  * SurfaceView (the system compositor does HDR / tone mapping). Audio goes to an AudioTrack, which
  * is also the master clock; AudioTrack.PlaybackParams gives independent speed and pitch.
  */
-class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) {
+class NativePlayer(
+    ctx: Context,
+    private val textures: TextureRegistry,
+    private val sink: (Map<String, Any?>) -> Unit,
+) {
     private val thread = HandlerThread("native-player").also { it.start() }
     private val h = Handler(thread.looper)
     private val main = Handler(Looper.getMainLooper())
@@ -53,8 +58,9 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
     private var aCodec: MediaCodec? = null
     private var durationUs = 0L
 
-    @Volatile
-    private var surface: Surface? = null
+    // The decoder renders into a Flutter texture we own (valid for the whole file), not a view's surface.
+    private var producer: TextureRegistry.SurfaceProducer? = null
+    private var codecSurface: Surface? = null
 
     // ---- transport ----
     private var playing = false
@@ -175,22 +181,6 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
         }
     }
 
-    fun setSurface(s: Surface?) { h.post { surface = s } }
-
-    /** Called from the SurfaceView on surfaceDestroyed: the codec must let go before we return. */
-    fun detachSurfaceBlocking() {
-        val latch = CountDownLatch(1)
-        h.post {
-            try {
-                dropVideoCodec()
-            } finally {
-                surface = null
-                latch.countDown()
-            }
-        }
-        latch.await(600, TimeUnit.MILLISECONDS)
-    }
-
     /** Frees the video decoder (and keeps it free) so the decoder test can use it. Blocks briefly. */
     fun setDiagnosing(on: Boolean) {
         val latch = CountDownLatch(1)
@@ -238,6 +228,19 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
         }
         if (frames.isNotEmpty()) sb.append(" {").append(frames).append("}")
         return sb.toString()
+    }
+
+    /** Flutter texture calls belong on the platform thread; block briefly until they ran. */
+    private fun <T> onMain(block: () -> T): T {
+        if (Looper.myLooper() == Looper.getMainLooper()) return block()
+        val latch = CountDownLatch(1)
+        var out: Result<T>? = null
+        main.post {
+            out = runCatching(block)
+            latch.countDown()
+        }
+        if (!latch.await(3, TimeUnit.SECONDS)) throw IllegalStateException("Timed out waiting for the UI thread")
+        return out!!.getOrThrow()
     }
 
     private inline fun quiet(block: () -> Unit) {
@@ -297,18 +300,28 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
         val vf = vFormat
         var w = 0
         var hgt = 0
+        var rot = 0
+        var textureId = -1L
         if (vf != null) {
             w = if (vf.containsKey(MediaFormat.KEY_WIDTH)) vf.getInteger(MediaFormat.KEY_WIDTH) else 0
             hgt = if (vf.containsKey(MediaFormat.KEY_HEIGHT)) vf.getInteger(MediaFormat.KEY_HEIGHT) else 0
-            val rot = if (vf.containsKey(MediaFormat.KEY_ROTATION)) vf.getInteger(MediaFormat.KEY_ROTATION) else 0
-            if (rot == 90 || rot == 270) {
-                val t = w; w = hgt; hgt = t
+            rot = if (vf.containsKey(MediaFormat.KEY_ROTATION)) vf.getInteger(MediaFormat.KEY_ROTATION) else 0
+            // Texture consumers ignore the codec's rotation hint, so Flutter rotates instead.
+            if (vf.containsKey(MediaFormat.KEY_ROTATION)) vf.setInteger(MediaFormat.KEY_ROTATION, 0)
+            val p = onMain {
+                val created = textures.createSurfaceProducer()
+                created.setSize(w, hgt)
+                created
             }
+            producer = p
+            textureId = p.id()
         }
         return mapOf(
             "durationMs" to durationUs / 1000,
             "width" to w,
             "height" to hgt,
+            "rotation" to rot,
+            "textureId" to textureId,
             "hasVideo" to (vf != null),
             "hasAudio" to (aFormat != null),
         )
@@ -331,6 +344,8 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
         track = null
         quiet { vEx?.release() }
         quiet { aEx?.release() }
+        producer?.let { p -> quiet { onMain { p.release() } } }
+        producer = null
         vEx = null; aEx = null; vFormat = null; aFormat = null
         pendingA = -1; pendingV = -1
         audioBaseSet = false; audioStarted = false
@@ -344,6 +359,7 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
             quiet { c.release() }
         }
         vCodec = null
+        codecSurface = null
         pendingV = -1
     }
 
@@ -433,11 +449,12 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
     private fun ensureVideoCodec() {
         if (videoDisabled || diagnosing) return
         val f = vFormat ?: return
-        val s = surface ?: return
+        val s = producer?.surface ?: return
         if (vCodec != null || !s.isValid) return
         val at = if (playing) clockUs() else pausedUs
         try {
             vCodec = createDecoder(f, s)
+            codecSurface = s
         } catch (e: Exception) {
             disableVideo(e)
             return
@@ -597,6 +614,8 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
 
     private fun tick(): Boolean {
         if (!opened) return false
+        val cur = producer?.surface
+        if (vCodec != null && cur !== codecSurface) dropVideoCodec()
         ensureVideoCodec()
 
         // A seek whose frame never shows (no surface, slow software decode) must still complete.

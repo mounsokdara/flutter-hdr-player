@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../engine/player_engine.dart';
+import '../engine/native_video.dart';
 import 'native_video_view.dart';
 
 /// Video + gestures: single tap = play/pause, double-tap left/right = -/+ 10 s
@@ -44,7 +45,10 @@ class _VideoSurfaceState extends State<VideoSurface> {
       child: LayoutBuilder(builder: (context, box) {
         var downX = 0.0;
         return Stack(fit: StackFit.expand, children: [
-          const NativeVideoView(),
+          ValueListenableBuilder<NativeVideoValue>(
+            valueListenable: widget.engine.video,
+            builder: (_, v, __) => NativeVideoView(value: v),
+          ),
           GestureDetector(
             behavior: HitTestBehavior.translucent,
             onDoubleTapDown: (d) => downX = d.localPosition.dx,

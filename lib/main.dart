@@ -136,21 +136,26 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
           // Video + controls stay pinned; only the info list scrolls (a platform view
           // inside a scrolling list janks).
           return Column(children: [
-            if (engine.loading) const LinearProgressIndicator(),
-            if (engine.error != null)
-              Padding(
-                padding: const EdgeInsets.all(12),
-                child: Text(engine.error!, style: const TextStyle(color: Colors.redAccent)),
-              ),
-            if (engine.ready)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                child: Column(children: [
-                  VideoSurface(engine: engine),
-                  SeekRow(engine: engine),
-                  OptionChips(engine: engine),
-                ]),
-              ),
+            // Fixed slots: nothing here may shift the video's position in the tree.
+            Column(children: [
+              if (engine.loading) const LinearProgressIndicator(),
+              if (engine.error != null)
+                Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Text(engine.error!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+                ),
+            ]),
+            engine.ready
+                ? Padding(
+                    key: const ValueKey('video-block'),
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                    child: Column(children: [
+                      VideoSurface(engine: engine),
+                      SeekRow(engine: engine),
+                      OptionChips(engine: engine),
+                    ]),
+                  )
+                : const SizedBox.shrink(),
             Expanded(
               child: ListView(
                 padding: const EdgeInsets.all(16),

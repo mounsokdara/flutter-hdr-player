@@ -184,7 +184,6 @@ class PlayerEngine extends ChangeNotifier {
     notifyListeners();
 
     try {
-      await video.setHdrMode(verdict?.isHdr ?? false);
       await video.open(file);
       await video.setSpeed(speed);
       await video.setPitch(pitchFactor);

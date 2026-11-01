@@ -89,9 +89,8 @@ class MainActivity : FlutterActivity() {
             override fun onListen(args: Any?, sink: EventChannel.EventSink?) { eventSink = sink }
             override fun onCancel(args: Any?) { eventSink = null }
         })
-        val player = NativePlayer(applicationContext) { m -> eventSink?.success(m) }
+        val player = NativePlayer(applicationContext, engine.renderer) { m -> eventSink?.success(m) }
         PlayerHolder.player = player
-        engine.platformViewsController.registry.registerViewFactory("native_video_view", VideoViewFactory())
 
         MethodChannel(messenger, "native_player").setMethodCallHandler { call, result ->
             val a = (call.arguments as? Map<*, *>) ?: emptyMap<String, Any>()
