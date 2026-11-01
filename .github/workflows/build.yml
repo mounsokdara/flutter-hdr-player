@@ -28,8 +28,6 @@ jobs:
           cp -r lib test pubspec.yaml build_app/
           mkdir -p build_app/android/app/src/main/kotlin/com/example/hdr_player
           cp native/MainActivity.kt build_app/android/app/src/main/kotlin/com/example/hdr_player/MainActivity.kt
-          # Ask Android to render the window in HDR color mode
-          sed -i '0,/<activity/s//<activity android:colorMode="hdr"/' build_app/android/app/src/main/AndroidManifest.xml
           # MediaFormat color keys + HDR static info need API 24
           sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/; s/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/' build_app/android/app/build.gradle*
           grep -n "minSdk" build_app/android/app/build.gradle*
