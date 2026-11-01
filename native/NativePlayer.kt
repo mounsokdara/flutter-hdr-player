@@ -371,40 +371,6 @@ class NativePlayer(
         if (Build.VERSION.SDK_INT >= 29) i.isSoftwareOnly
         else i.name.startsWith("OMX.google.") || i.name.startsWith("c2.android.")
 
-    /**
-     * Vendor decoders sometimes reject a stream's full format (frame-rate hints, profile/level,
-     * colour keys) with an opaque configure error. Try: the full format, then only the
-     * essentials plus colour/HDR keys, then only the bare essentials.
-     */
-    private fun configVariants(f: MediaFormat, mime: String): List<MediaFormat> {
-        if (!mime.startsWith("video/")) return listOf(f)
-        val w = f.getInteger(MediaFormat.KEY_WIDTH)
-        val h = f.getInteger(MediaFormat.KEY_HEIGHT)
-        fun essentials(withColor: Boolean): MediaFormat {
-            val m = MediaFormat.createVideoFormat(mime, w, h)
-            for (k in listOf("csd-0", "csd-1", "csd-2")) {
-                if (f.containsKey(k)) m.setByteBuffer(k, f.getByteBuffer(k)!!.duplicate())
-            }
-            for (k in listOf(MediaFormat.KEY_MAX_INPUT_SIZE, MediaFormat.KEY_ROTATION)) {
-                if (f.containsKey(k)) m.setInteger(k, f.getInteger(k))
-            }
-            if (withColor) {
-                for (k in listOf(
-                    MediaFormat.KEY_COLOR_STANDARD,
-                    MediaFormat.KEY_COLOR_TRANSFER,
-                    MediaFormat.KEY_COLOR_RANGE
-                )) {
-                    if (f.containsKey(k)) m.setInteger(k, f.getInteger(k))
-                }
-                if (f.containsKey(MediaFormat.KEY_HDR_STATIC_INFO)) {
-                    m.setByteBuffer(MediaFormat.KEY_HDR_STATIC_INFO, f.getByteBuffer(MediaFormat.KEY_HDR_STATIC_INFO)!!.duplicate())
-                }
-            }
-            return m
-        }
-        return listOf(f, essentials(true), essentials(false))
-    }
-
     private var decoderKey = ""
     @Volatile private var stage = ""
     @Volatile private var diagnosing = false
@@ -424,7 +390,7 @@ class NativePlayer(
             }
         val fails = StringBuilder()
         for (info in candidates) {
-            val variants = configVariants(f, mime)
+            val variants = codecConfigVariants(f, mime)
             for ((idx, fmt) in variants.withIndex()) {
                 val key = "${info.name}#$idx"
                 if (key in badDecoders) continue
@@ -435,7 +401,7 @@ class NativePlayer(
                     c.start()
                     decoderName = info.name
                     decoderKey = key
-                    decoderNote = if (idx == 0) "" else " (relaxed config $idx)"
+                    decoderNote = if (idx == 0) "" else " (" + variantName(idx) + ")"
                     return c
                 } catch (e: Exception) {
                     fails.append("\n").append(key).append(": ").append(describe(e))

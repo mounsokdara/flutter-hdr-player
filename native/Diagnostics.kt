@@ -46,36 +46,6 @@ object Diagnostics {
         return names[level]?.let { "main-$it" } ?: high[level]?.let { "high-$it" } ?: ("0x" + Integer.toHexString(level))
     }
 
-    private fun configVariants(f: MediaFormat, mime: String): List<MediaFormat> {
-        if (!mime.startsWith("video/")) return listOf(f)
-        val w = f.getInteger(MediaFormat.KEY_WIDTH)
-        val h = f.getInteger(MediaFormat.KEY_HEIGHT)
-        fun essentials(withColor: Boolean): MediaFormat {
-            val m = MediaFormat.createVideoFormat(mime, w, h)
-            for (k in listOf("csd-0", "csd-1", "csd-2")) {
-                if (f.containsKey(k)) m.setByteBuffer(k, f.getByteBuffer(k)!!.duplicate())
-            }
-            for (k in listOf(MediaFormat.KEY_MAX_INPUT_SIZE, MediaFormat.KEY_ROTATION)) {
-                if (f.containsKey(k)) m.setInteger(k, f.getInteger(k))
-            }
-            if (withColor) {
-                for (k in listOf(
-                    MediaFormat.KEY_COLOR_STANDARD,
-                    MediaFormat.KEY_COLOR_TRANSFER,
-                    MediaFormat.KEY_COLOR_RANGE
-                )) {
-                    if (f.containsKey(k)) m.setInteger(k, f.getInteger(k))
-                }
-                if (f.containsKey(MediaFormat.KEY_HDR_STATIC_INFO)) {
-                    m.setByteBuffer(MediaFormat.KEY_HDR_STATIC_INFO, f.getByteBuffer(MediaFormat.KEY_HDR_STATIC_INFO)!!.duplicate())
-                }
-            }
-            return m
-        }
-        return listOf(f, essentials(true), essentials(false))
-    }
-
-
     fun run(path: String): String {
         val sb = StringBuilder()
         val ex = MediaExtractor()
@@ -117,7 +87,7 @@ object Diagnostics {
             } catch (e: Exception) {
                 sb.appendLine("capabilities: " + describe(e))
             }
-            for ((idx, fmt) in configVariants(f, mime).withIndex()) {
+            for ((idx, fmt) in codecConfigVariants(f, mime).withIndex()) {
                 sb.appendLine(tryDecode(path, vi, info.name, fmt, idx))
             }
         }
@@ -167,12 +137,12 @@ object Diagnostics {
                 if (o >= 0) {
                     stage = "releaseOutput"
                     c.releaseOutputBuffer(o, false)
-                    return "#$idx OK: first frame after $inputs inputs (pts ${info.presentationTimeUs} us)"
+                    return "#$idx (${variantName(idx)}) OK: first frame after $inputs inputs (pts ${info.presentationTimeUs} us)"
                 }
             }
-            return "#$idx no frame within 3 s (inputs=$inputs, last call=$stage)"
+            return "#$idx (${variantName(idx)}) no frame within 3 s (inputs=$inputs, last call=$stage)"
         } catch (e: Exception) {
-            return "#$idx FAIL at $stage: ${describe(e)}"
+            return "#$idx (${variantName(idx)}) FAIL at $stage: ${describe(e)}"
         } finally {
             try { c?.stop() } catch (e: Exception) {}
             try { c?.release() } catch (e: Exception) {}
