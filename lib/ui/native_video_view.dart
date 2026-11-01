@@ -1,4 +1,3 @@
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -15,7 +14,7 @@ class NativeVideoView extends StatelessWidget {
       viewType: viewType,
       surfaceFactory: (context, controller) => AndroidViewSurface(
         controller: controller as AndroidViewController,
-        gestureRecognizers: const <Factory<OneSequenceGestureRecognizer>>{},
+        gestureRecognizers: const {},
         hitTestBehavior: PlatformViewHitTestBehavior.transparent,
       ),
       onCreatePlatformView: (params) {
