@@ -191,6 +191,27 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
         latch.await(600, TimeUnit.MILLISECONDS)
     }
 
+    /** Frees the video decoder (and keeps it free) so the decoder test can use it. Blocks briefly. */
+    fun setDiagnosing(on: Boolean) {
+        val latch = CountDownLatch(1)
+        h.post {
+            try {
+                diagnosing = on
+                if (on) {
+                    val at = if (playing) clockUs() else pausedUs
+                    if (playing) doPause()
+                    pausedUs = at
+                    dropVideoCodec()
+                } else {
+                    needFirstFrame = vFormat != null
+                }
+            } finally {
+                latch.countDown()
+            }
+        }
+        latch.await(1500, TimeUnit.MILLISECONDS)
+    }
+
     fun release() {
         h.post {
             released = true
@@ -212,9 +233,10 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
             e.diagnosticInfo.let { d -> sb.append(" ").append(d) }
             sb.append("]")
         }
-        e.stackTrace.firstOrNull { it.className.startsWith("com.example") }?.let {
-            sb.append(" @").append(it.fileName).append(":").append(it.lineNumber)
+        val frames = e.stackTrace.take(4).joinToString(" < ") {
+            it.className.substringAfterLast('.') + "." + it.methodName + ":" + it.lineNumber
         }
+        if (frames.isNotEmpty()) sb.append(" {").append(frames).append("}")
         return sb.toString()
     }
 
@@ -368,6 +390,8 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
     }
 
     private var decoderKey = ""
+    @Volatile private var stage = ""
+    @Volatile private var diagnosing = false
     private var decoderNote = ""
 
     private fun createDecoder(f: MediaFormat, s: Surface?): MediaCodec {
@@ -407,7 +431,7 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
     }
 
     private fun ensureVideoCodec() {
-        if (videoDisabled) return
+        if (videoDisabled || diagnosing) return
         val f = vFormat ?: return
         val s = surface ?: return
         if (vCodec != null || !s.isValid) return
@@ -429,10 +453,10 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
     /** A decoder died mid-stream: remember it and let ensureVideoCodec() pick the next candidate. */
     private fun onVideoError(e: Exception) {
         val name = decoderKey
-        decoderLog.append(name).append(" (runtime): ").append(describe(e)).append('\n')
+        decoderLog.append(name).append(" (runtime @").append(stage).append("): ").append(describe(e)).append('\n')
         badDecoders.add(decoderKey)
         dropVideoCodec()
-        emit(mapOf("type" to "error", "message" to "Decoder $name failed while decoding (${describe(e)}), trying the next one"))
+        emit(mapOf("type" to "error", "message" to "Decoder $name failed while decoding at [$stage] (${describe(e)}), trying the next one"))
     }
 
     /** No decoder works: keep going audio-only instead of dying. */
@@ -460,7 +484,7 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
         audioStarted = false
         anchorUs = now
         anchorNs = System.nanoTime()
-        emit(mapOf("type" to "error", "message" to "Audio disabled: ${describe(e)}"))
+        emit(mapOf("type" to "error", "message" to "Audio disabled at [$stage]: ${describe(e)}"))
     }
 
     // =====================================================================================
@@ -580,7 +604,7 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
 
         if (playing || needFirstFrame) {
             try {
-                vInEos = feed(vEx, vCodec, vInEos)
+                vInEos = feed(vEx, vCodec, vInEos, "video")
                 drainVideo()
             } catch (e: Exception) {
                 onVideoError(e)
@@ -588,7 +612,7 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
         }
         if (playing) {
             try {
-                aInEos = feed(aEx, aCodec, aInEos)
+                aInEos = feed(aEx, aCodec, aInEos, "audio")
                 drainAudio()
             } catch (e: Exception) {
                 onAudioError(e)
@@ -600,19 +624,25 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
         return playing || (needFirstFrame && vCodec != null)
     }
 
-    private fun feed(ex: MediaExtractor?, c: MediaCodec?, eos: Boolean): Boolean {
+    private fun feed(ex: MediaExtractor?, c: MediaCodec?, eos: Boolean, tag: String): Boolean {
         if (ex == null || c == null || eos) return eos
         var n = 0
         while (n++ < 6) {
+            stage = "$tag.dequeueInput"
             val i = c.dequeueInputBuffer(0)
             if (i < 0) return false
+            stage = "$tag.getInputBuffer"
             val buf = c.getInputBuffer(i) ?: return false
+            buf.clear()
+            stage = "$tag.readSample"
             val size = ex.readSampleData(buf, 0)
+            stage = "$tag.queueInput"
             if (size < 0) {
                 c.queueInputBuffer(i, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                 return true
             }
             c.queueInputBuffer(i, 0, size, ex.sampleTime, 0)
+            stage = "$tag.advance"
             ex.advance()
         }
         return false
@@ -627,6 +657,7 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
         var n = 0
         while (n++ < 4) {
             if (pendingV < 0) {
+                stage = "video.dequeueOutput"
                 val i = c.dequeueOutputBuffer(vInfo, 0)
                 if (i == MediaCodec.INFO_TRY_AGAIN_LATER) return
                 if (i < 0) continue // format / buffers changed
@@ -634,6 +665,7 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
                 pendingVPts = vInfo.presentationTimeUs
                 pendingVFlags = vInfo.flags
             }
+            stage = "video.releaseOutput"
             if (pendingVFlags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
                 c.releaseOutputBuffer(pendingV, false)
                 pendingV = -1

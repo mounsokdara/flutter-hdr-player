@@ -105,6 +105,10 @@ class NativeVideoController extends ValueNotifier<NativeVideoValue> {
 
   Future<void> setSpeed(double v) => _method.invokeMethod('setSpeed', {'value': v});
   Future<void> setPitch(double v) => _method.invokeMethod('setPitch', {'value': v});
+  /// Headless decoder test of every decoder/config on this device. Returns a text report.
+  Future<String> diagnose(String path) async =>
+      (await _method.invokeMethod<String>('diagnose', {'path': path})) ?? 'No report';
+
   Future<void> setHdrMode(bool on) => _method.invokeMethod('setHdrMode', {'value': on});
 
   @override

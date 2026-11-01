@@ -121,6 +121,20 @@ class MainActivity : FlutterActivity() {
                     }
                     result.success(null)
                 }
+                "diagnose" -> {
+                    val path = a["path"] as String
+                    Thread {
+                        player.setDiagnosing(true)
+                        val report = try {
+                            Diagnostics.run(path)
+                        } catch (e: Exception) {
+                            "Diagnostics failed: " + e.javaClass.simpleName + ": " + e.message
+                        } finally {
+                            player.setDiagnosing(false)
+                        }
+                        runOnUiThread { result.success(report) }
+                    }.start()
+                }
                 "release" -> { result.success(null) }
                 else -> result.notImplemented()
             }

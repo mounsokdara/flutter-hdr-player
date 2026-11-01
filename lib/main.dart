@@ -1,5 +1,6 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'background_playback.dart';
 import 'engine/player_engine.dart';
@@ -51,6 +52,55 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     if (state == AppLifecycleState.paused && !engine.backgroundEnabled) engine.pause();
   }
 
+  Future<void> _diagnose() async {
+    final path = engine.path;
+    if (path == null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Open a video first, then run the decoder test.')));
+      return;
+    }
+    final report = engine.video.diagnose(path);
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Decoder test'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: FutureBuilder<String>(
+            future: report,
+            builder: (context, snap) {
+              if (!snap.hasData && !snap.hasError) {
+                return const Row(children: [
+                  CircularProgressIndicator(),
+                  SizedBox(width: 16),
+                  Expanded(child: Text('Trying every decoder, this takes a few seconds…')),
+                ]);
+              }
+              return SingleChildScrollView(
+                child: SelectableText(snap.data ?? 'Failed: ${snap.error}',
+                    style: const TextStyle(fontFamily: 'monospace', fontSize: 11)),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              final text = await report;
+              await Clipboard.setData(ClipboardData(text: text));
+              if (ctx.mounted) {
+                ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Report copied')));
+              }
+            },
+            child: const Text('Copy'),
+          ),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
+        ],
+      ),
+    );
+  }
+
   Future<void> _pick() async {
     final res = await FilePicker.platform.pickFiles(type: FileType.video);
     final path = res?.files.single.path;
@@ -60,7 +110,16 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('HDR Player')),
+      appBar: AppBar(
+        title: const Text('HDR Player'),
+        actions: [
+          IconButton(
+            tooltip: 'Test decoders',
+            icon: const Icon(Icons.bug_report_outlined),
+            onPressed: _diagnose,
+          ),
+        ],
+      ),
       floatingActionButton: ListenableBuilder(
         listenable: engine,
         builder: (_, __) => FloatingActionButton.extended(
