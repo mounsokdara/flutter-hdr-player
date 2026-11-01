@@ -28,6 +28,8 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private var hdrWindow = false
+
     private fun num(a: Map<*, *>, k: String): Number = (a[k] as? Number) ?: 0
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -106,8 +108,13 @@ class MainActivity : FlutterActivity() {
                 "setSpeed" -> { player.setSpeed(num(a, "value").toFloat()); result.success(null) }
                 "setPitch" -> { player.setPitch(num(a, "value").toFloat()); result.success(null) }
                 "setHdrMode" -> {
-                    val on = a["value"] as? Boolean ?: false
-                    if (Build.VERSION.SDK_INT >= 26) {
+                    val want = a["value"] as? Boolean ?: false
+                    // Only switch the window to HDR when the display can actually show HDR.
+                    @Suppress("DEPRECATION")
+                    val displayHdr = try { windowManager.defaultDisplay.isHdr } catch (e: Exception) { false }
+                    val on = want && displayHdr
+                    if (Build.VERSION.SDK_INT >= 26 && on != hdrWindow) {
+                        hdrWindow = on
                         runOnUiThread {
                             window.colorMode = if (on) ActivityInfo.COLOR_MODE_HDR else ActivityInfo.COLOR_MODE_DEFAULT
                         }

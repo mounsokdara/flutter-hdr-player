@@ -102,6 +102,10 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
     private var lastEmitNs = 0L
     private var focus: AudioFocusRequest? = null
     private var decoderName = ""
+    private val badDecoders = HashSet<String>()
+    private val decoderLog = StringBuilder()
+    private var videoDisabled = false
+    private var audioDisabled = false
 
     init {
         h.post(object : Runnable {
@@ -130,7 +134,7 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
                 main.post { done(info, null) }
             } catch (e: Exception) {
                 teardown()
-                val msg = e.message ?: e.toString()
+                val msg = describe(e)
                 main.post { done(null, msg) }
             }
         }
@@ -199,6 +203,21 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
     // Open / teardown
     // =====================================================================================
 
+    /** Class, message, codec error details and the first frame in our own code. */
+    private fun describe(e: Throwable): String {
+        val sb = StringBuilder(e.javaClass.simpleName)
+        e.message?.let { sb.append(": ").append(it) }
+        if (e is MediaCodec.CodecException) {
+            sb.append(" [code=").append(e.errorCode).append(" recoverable=").append(e.isRecoverable)
+            e.diagnosticInfo.let { d -> sb.append(" ").append(d) }
+            sb.append("]")
+        }
+        e.stackTrace.firstOrNull { it.className.startsWith("com.example") }?.let {
+            sb.append(" @").append(it.fileName).append(":").append(it.lineNumber)
+        }
+        return sb.toString()
+    }
+
     private inline fun quiet(block: () -> Unit) {
         try {
             block()
@@ -240,6 +259,7 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
         }
 
         durationUs = max(vFormat?.durationUs() ?: 0L, aFormat?.durationUs() ?: 0L)
+        badDecoders.clear(); decoderLog.setLength(0); videoDisabled = false; audioDisabled = false
         playing = false
         atEnd = false
         pausedUs = 0L
@@ -316,7 +336,9 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
     private fun createDecoder(f: MediaFormat, s: Surface?): MediaCodec {
         val mime = f.getString(MediaFormat.KEY_MIME) ?: throw IllegalStateException("No mime")
         val candidates = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
-            .filter { !it.isEncoder && it.supportedTypes.any { t -> t.equals(mime, true) } }
+            .filter {
+                !it.isEncoder && it.name !in badDecoders && it.supportedTypes.any { t -> t.equals(mime, true) }
+            }
             .sortedBy { info ->
                 val claims = try {
                     info.getCapabilitiesForType(mime).isFormatSupported(f)
@@ -339,21 +361,64 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
                 quiet { c?.release() }
             }
         }
-        throw IllegalStateException("No decoder could start $mime" + (last?.message?.let { ": $it" } ?: ""))
+        throw IllegalStateException("No decoder could start $mime" + (last?.let { ": " + describe(it) } ?: ""))
     }
 
     private fun ensureVideoCodec() {
+        if (videoDisabled) return
         val f = vFormat ?: return
         val s = surface ?: return
         if (vCodec != null || !s.isValid) return
         val at = if (playing) clockUs() else pausedUs
-        vCodec = createDecoder(f, s)
+        try {
+            vCodec = createDecoder(f, s)
+        } catch (e: Exception) {
+            disableVideo(e)
+            return
+        }
         emit(mapOf("type" to "decoder", "name" to decoderName))
         quiet { vEx?.seekTo(at, MediaExtractor.SEEK_TO_PREVIOUS_SYNC) }
         skipBeforeUs = at
         vInEos = false; vOutDone = false; pendingV = -1
         needFirstFrame = true
         seekStartNs = System.nanoTime()
+    }
+
+    /** A decoder died mid-stream: remember it and let ensureVideoCodec() pick the next candidate. */
+    private fun onVideoError(e: Exception) {
+        val name = decoderName
+        decoderLog.append(name).append(": ").append(describe(e)).append('\n')
+        badDecoders.add(name)
+        dropVideoCodec()
+        emit(mapOf("type" to "error", "message" to "Decoder $name failed (${describe(e)}), trying the next one"))
+    }
+
+    /** No decoder works: keep going audio-only instead of dying. */
+    private fun disableVideo(e: Exception) {
+        videoDisabled = true
+        needFirstFrame = false
+        finishSeek()
+        val log = if (decoderLog.isNotEmpty()) "\n" + decoderLog.toString().trim() else ""
+        emit(mapOf("type" to "error", "message" to "No working video decoder: ${describe(e)}$log"))
+    }
+
+    private fun onAudioError(e: Exception) {
+        val now = clockUs()
+        audioDisabled = true
+        aCodec?.let { c ->
+            quiet { c.stop() }
+            quiet { c.release() }
+        }
+        aCodec = null
+        track?.let { t ->
+            quiet { t.pause() }
+            quiet { t.release() }
+        }
+        track = null
+        audioStarted = false
+        anchorUs = now
+        anchorNs = System.nanoTime()
+        emit(mapOf("type" to "error", "message" to "Audio disabled: ${describe(e)}"))
     }
 
     // =====================================================================================
@@ -423,7 +488,7 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
     private fun fail(e: Exception) {
         playing = false
         quiet { track?.pause() }
-        emit(mapOf("type" to "error", "message" to (e.message ?: e.toString())))
+        emit(mapOf("type" to "error", "message" to describe(e)))
         emitState()
     }
 
@@ -472,12 +537,20 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
         if (seekDone != null && System.nanoTime() - seekStartNs > 1_500_000_000L) finishSeek()
 
         if (playing || needFirstFrame) {
-            vInEos = feed(vEx, vCodec, vInEos)
-            drainVideo()
+            try {
+                vInEos = feed(vEx, vCodec, vInEos)
+                drainVideo()
+            } catch (e: Exception) {
+                onVideoError(e)
+            }
         }
         if (playing) {
-            aInEos = feed(aEx, aCodec, aInEos)
-            drainAudio()
+            try {
+                aInEos = feed(aEx, aCodec, aInEos)
+                drainAudio()
+            } catch (e: Exception) {
+                onAudioError(e)
+            }
             checkEnded()
         }
         val now = System.nanoTime()
