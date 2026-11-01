@@ -202,7 +202,7 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
     private inline fun quiet(block: () -> Unit) {
         try {
             block()
-        } catch (_: Exception) {
+        } catch (ignored: Exception) {
         }
     }
 
@@ -320,7 +320,7 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
             .sortedBy { info ->
                 val claims = try {
                     info.getCapabilitiesForType(mime).isFormatSupported(f)
-                } catch (_: Exception) {
+                } catch (ignored: Exception) {
                     false
                 }
                 (if (isSoftware(info)) 2 else 0) + (if (claims) 0 else 1)
@@ -449,7 +449,7 @@ class NativePlayer(ctx: Context, private val sink: (Map<String, Any?>) -> Unit) 
                         return us
                     }
                 }
-            } catch (_: Exception) {
+            } catch (ignored: Exception) {
             }
         }
         return anchorUs + ((now - anchorNs) / 1000.0 * speed).toLong()

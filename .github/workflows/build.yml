@@ -38,8 +38,8 @@ jobs:
           open(p, 'w').write(s)
           PY
           grep -n "PlaybackService\|FOREGROUND" build_app/android/app/src/main/AndroidManifest.xml
-          # MediaFormat color keys + HDR static info need API 24
-          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/; s/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/' build_app/android/app/build.gradle*
+          # MediaFormat color keys + HDR static info need API 26
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 26/; s/minSdkVersion flutter.minSdkVersion/minSdkVersion 26/' build_app/android/app/build.gradle*
           grep -n "minSdk" build_app/android/app/build.gradle*
 
       - name: Test
@@ -53,7 +53,7 @@ jobs:
         run: |
           set -o pipefail
           flutter build apk --release --split-per-abi --no-shrink 2>&1 | tee build.log || {
-            { grep -E '^e: ' build.log | head -15; sed -n '/What went wrong/,/Try:/p' build.log | head -12; } | cut -c1-320 | while IFS= read -r l; do echo "::error::$l"; done
+            { grep -E '^e: |Error:|error:|FAILURE|What went wrong' build.log | head -20; tail -25 build.log; } | cut -c1-320 | while IFS= read -r l; do echo "::error::$l"; done
             exit 1
           }
 
