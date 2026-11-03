@@ -21,6 +21,18 @@ jobs:
           channel: stable
           cache: true
 
+      # Decode-only FFmpeg (LGPL, arm64). Cached: only rebuilt when the build script changes.
+      - name: Cache FFmpeg build
+        id: ffcache
+        uses: actions/cache@v4
+        with:
+          path: native_sw/ffmpeg
+          key: ffmpeg-n7.1-arm64-${{ hashFiles('native_sw/build_ffmpeg.sh') }}
+
+      - name: Build FFmpeg decoder libs
+        if: steps.ffcache.outputs.cache-hit != 'true'
+        run: bash native_sw/build_ffmpeg.sh
+
       - name: Generate Android scaffold
         run: |
           flutter create --org com.example --project-name hdr_player --platforms=android build_app
@@ -28,6 +40,10 @@ jobs:
           cp -r lib test pubspec.yaml build_app/
           mkdir -p build_app/android/app/src/main/kotlin/com/example/hdr_player
           cp native/*.kt build_app/android/app/src/main/kotlin/com/example/hdr_player/
+          mkdir -p build_app/android/app/src/main/cpp
+          cp native_sw/CMakeLists.txt native_sw/swdecode.cpp build_app/android/app/src/main/cpp/
+          cp -r native_sw/ffmpeg build_app/android/app/src/main/cpp/ffmpeg
+          python3 native_sw/patch_gradle.py
           python3 - <<'PY'
           p = 'build_app/android/app/src/main/AndroidManifest.xml'
           s = open(p).read()
@@ -37,8 +53,7 @@ jobs:
           s = s.replace('</application>', '<service android:name=".PlaybackService" android:exported="false" android:foregroundServiceType="mediaPlayback"/></application>', 1)
           open(p, 'w').write(s)
           PY
-          grep -n "PlaybackService\|FOREGROUND" build_app/android/app/src/main/AndroidManifest.xml
-          # MediaFormat color keys + HDR static info need API 26
+          # Audio focus, HDR window mode and MediaFormat color keys need API 26
           sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 26/; s/minSdkVersion flutter.minSdkVersion/minSdkVersion 26/' build_app/android/app/build.gradle*
           grep -n "minSdk" build_app/android/app/build.gradle*
 
@@ -52,8 +67,8 @@ jobs:
         working-directory: build_app
         run: |
           set -o pipefail
-          flutter build apk --release --split-per-abi --no-shrink 2>&1 | tee build.log || {
-            { grep -E '^e: |Error:|error:|FAILURE|What went wrong' build.log | head -20; tail -25 build.log; } | cut -c1-320 | while IFS= read -r l; do echo "::error::$l"; done
+          flutter build apk --release --target-platform android-arm64 --no-shrink 2>&1 | tee build.log || {
+            { grep -E '^e: |Error:|error:|FAILURE|What went wrong|CMake|ninja:|undefined reference|fatal error' build.log | head -25; tail -25 build.log; } | cut -c1-320 | while IFS= read -r l; do echo "::error::$l"; done
             exit 1
           }
 

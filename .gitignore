@@ -1,3 +1,5 @@
 build/
 build_app/
 .dart_tool/
+native_sw/ffmpeg/
+native_sw/ffsrc/

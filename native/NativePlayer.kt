@@ -65,6 +65,17 @@ class NativePlayer(
     private var producer: TextureRegistry.SurfaceProducer? = null
     private var codecSurface: Surface? = null
 
+    // Software path (FFmpeg decode) for streams no phone decoder supports, e.g. HEVC Main 10.
+    private var softwareMode = false
+    private var stEntry: TextureRegistry.SurfaceTextureEntry? = null
+    private var stSurface: Surface? = null
+    private var sw = 0L
+    private var swBuf: java.nio.ByteBuffer? = null
+    private var swHave = false
+    private var swPts = 0L
+    private var swEos = false
+    private var swSkip = 0
+
     // ---- transport ----
     private var playing = false
     private var atEnd = false
@@ -246,6 +257,22 @@ class NativePlayer(
         return out!!.getOrThrow()
     }
 
+    /** True when the stream is 10-bit HEVC and no decoder on this phone lists a 10-bit profile. */
+    private fun noHardwareFor(f: MediaFormat): Boolean {
+        val mime = f.getString(MediaFormat.KEY_MIME) ?: return false
+        if (!mime.equals("video/hevc", true) || !f.containsKey(MediaFormat.KEY_PROFILE)) return false
+        val p = f.getInteger(MediaFormat.KEY_PROFILE)
+        if (!(p == 2 || p == 4096 || p == 8192)) return false
+        val any = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.any { info ->
+            !info.isEncoder && info.supportedTypes.any { t -> t.equals(mime, true) } && try {
+                info.getCapabilitiesForType(mime).profileLevels.any { it.profile == 2 || it.profile == 4096 || it.profile == 8192 }
+            } catch (ignored: Exception) {
+                false
+            }
+        }
+        return !any
+    }
+
     private inline fun quiet(block: () -> Unit) {
         try {
             block()
@@ -311,13 +338,26 @@ class NativePlayer(
             rot = if (vf.containsKey(MediaFormat.KEY_ROTATION)) vf.getInteger(MediaFormat.KEY_ROTATION) else 0
             // Texture consumers ignore the codec's rotation hint, so Flutter rotates instead.
             if (vf.containsKey(MediaFormat.KEY_ROTATION)) vf.setInteger(MediaFormat.KEY_ROTATION, 0)
-            val p = onMain {
-                val created = textures.createSurfaceProducer()
-                created.setSize(w, hgt)
-                created
+            softwareMode = SwNative.available && noHardwareFor(vf)
+            if (softwareMode) {
+                // CPU-written frames: a SurfaceTexture entry accepts ANativeWindow_lock writes.
+                val pair = onMain {
+                    val e = textures.createSurfaceTexture()
+                    e.surfaceTexture().setDefaultBufferSize(w, hgt)
+                    Pair(e, Surface(e.surfaceTexture()))
+                }
+                stEntry = pair.first
+                stSurface = pair.second
+                textureId = pair.first.id()
+            } else {
+                val p = onMain {
+                    val created = textures.createSurfaceProducer()
+                    created.setSize(w, hgt)
+                    created
+                }
+                producer = p
+                textureId = p.id()
             }
-            producer = p
-            textureId = p.id()
         }
         return mapOf(
             "durationMs" to durationUs / 1000,
@@ -349,6 +389,9 @@ class NativePlayer(
         quiet { aEx?.release() }
         producer?.let { p -> quiet { onMain { p.release() } } }
         producer = null
+        stSurface?.let { quiet { it.release() } }
+        stEntry?.let { e -> quiet { onMain { e.release() } } }
+        stSurface = null; stEntry = null; softwareMode = false
         vEx = null; aEx = null; vFormat = null; aFormat = null
         pendingA = -1; pendingV = -1
         audioBaseSet = false; audioStarted = false
@@ -364,6 +407,11 @@ class NativePlayer(
         vCodec = null
         codecSurface = null
         pendingV = -1
+        if (sw != 0L) {
+            SwNative.nRelease(sw)
+            sw = 0L
+        }
+        swHave = false
     }
 
     // =====================================================================================
@@ -447,6 +495,10 @@ class NativePlayer(
 
     private fun ensureVideoCodec() {
         if (videoDisabled || diagnosing) return
+        if (softwareMode) {
+            ensureSoftware()
+            return
+        }
         val f = vFormat ?: return
         val s = producer?.surface ?: return
         if (vCodec != null || !s.isValid) return
@@ -464,6 +516,125 @@ class NativePlayer(
         vInEos = false; vOutDone = false; pendingV = -1
         needFirstFrame = true
         seekStartNs = System.nanoTime()
+    }
+
+    private fun ensureSoftware() {
+        if (sw != 0L) return
+        val f = vFormat ?: return
+        val surf = stSurface ?: return
+        val csd = if (f.containsKey("csd-0")) {
+            val bb = f.getByteBuffer("csd-0")!!.duplicate()
+            ByteArray(bb.remaining()).also { bb.get(it) }
+        } else {
+            ByteArray(0)
+        }
+        val threads = Runtime.getRuntime().availableProcessors()
+        val h = SwNative.nCreate(csd, threads)
+        if (h == 0L) {
+            disableVideo(UnsupportedStreamException("The software decoder could not start for this stream."))
+            return
+        }
+        SwNative.nSetSurface(h, surf)
+        sw = h
+        val maxIn = if (f.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) f.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) else 0
+        swBuf = java.nio.ByteBuffer.allocateDirect(max(maxIn, 2 * 1024 * 1024))
+        decoderName = "software (FFmpeg HEVC, $threads threads)"
+        decoderNote = ""
+        emit(mapOf("type" to "decoder", "name" to decoderName))
+        val at = if (playing) clockUs() else pausedUs
+        quiet { vEx?.seekTo(at, MediaExtractor.SEEK_TO_PREVIOUS_SYNC) }
+        skipBeforeUs = at
+        swHave = false; swEos = false; swSkip = 0
+        vOutDone = false
+        needFirstFrame = true
+        seekStartNs = System.nanoTime()
+    }
+
+    /** Decode a few frames per tick, present the ones that are due, drop the late ones. */
+    private fun swStep() {
+        val h = sw
+        val ex = vEx ?: return
+        val buf = swBuf ?: return
+        val t0 = System.nanoTime()
+        var frames = 0
+        while (frames < 3 && System.nanoTime() - t0 < 25_000_000L) {
+            stage = "sw.receive"
+            if (!swHave) {
+                val r = SwNative.nReceive(h)
+                if (r == SwNative.NONE) {
+                    if (swEos) {
+                        vOutDone = true
+                        if (needFirstFrame) { needFirstFrame = false; finishSeek() }
+                        return
+                    }
+                    stage = "sw.readSample"
+                    buf.clear()
+                    val size = ex.readSampleData(buf, 0)
+                    stage = "sw.send"
+                    if (size < 0) {
+                        SwNative.nSendEos(h)
+                        swEos = true
+                    } else {
+                        val rc = SwNative.nSend(h, buf, size, ex.sampleTime)
+                        ex.advance()
+                        if (rc < 0) throw IllegalStateException("software decoder rejected a packet (error $rc)")
+                    }
+                    continue
+                }
+                if (r == SwNative.EOS) {
+                    vOutDone = true
+                    swEos = true
+                    if (needFirstFrame) { needFirstFrame = false; finishSeek() }
+                    return
+                }
+                if (r == SwNative.ERR) throw IllegalStateException("software decoder error")
+                swPts = r
+                swHave = true
+            }
+            stage = "sw.present"
+            if (swPts < skipBeforeUs) {
+                SwNative.nDrop(h); swHave = false
+                continue
+            }
+            val now = System.nanoTime()
+            if (needFirstFrame) {
+                SwNative.nPresent(h)
+                swHave = false
+                lastRenderNs = now
+                pausedUs = swPts
+                anchorUs = swPts
+                anchorNs = now
+                needFirstFrame = false
+                finishSeek()
+                if (!playing) return
+                frames++
+                continue
+            }
+            if (!playing) return
+            val delayUs = ((swPts - clockUs()).toDouble() / speed).toLong()
+            if (delayUs > 15_000L) return
+            // Falling behind: stop decoding non-reference frames until we catch up.
+            if (delayUs < -250_000L && swSkip != 1) { SwNative.nSetSkip(h, 1); swSkip = 1 }
+            else if (delayUs > -60_000L && swSkip != 0) { SwNative.nSetSkip(h, 0); swSkip = 0 }
+            if (delayUs < -40_000L && now - lastRenderNs < 250_000_000L) {
+                SwNative.nDrop(h)
+            } else {
+                SwNative.nPresent(h)
+                lastRenderNs = now
+            }
+            swHave = false
+            frames++
+        }
+    }
+
+    private fun onSwError(e: Exception) {
+        decoderLog.append("software (runtime @").append(stage).append("): ").append(describe(e)).append('\n')
+        if (sw != 0L) { SwNative.nRelease(sw); sw = 0L }
+        swHave = false
+        videoDisabled = true
+        needFirstFrame = false
+        finishSeek()
+        emit(mapOf("type" to "error", "message" to "Software decoder failed at [$stage]: ${describe(e)}"))
     }
 
     /** A decoder died mid-stream: remember it and let ensureVideoCodec() pick the next candidate. */
@@ -539,6 +710,11 @@ class NativePlayer(
         }
         quiet { aEx?.seekTo(t, MediaExtractor.SEEK_TO_CLOSEST_SYNC) }
         quiet { vCodec?.flush() }
+        if (sw != 0L) {
+            SwNative.nFlush(sw)
+            swHave = false
+            swEos = false
+        }
         pendingV = -1; vInEos = false; vOutDone = false
         quiet { aCodec?.flush() }
         pendingA = -1; aInEos = false; aOutDone = false
@@ -618,7 +794,7 @@ class NativePlayer(
     private fun tick(): Boolean {
         if (!opened) return false
         val cur = producer?.surface
-        if (vCodec != null && cur !== codecSurface) dropVideoCodec()
+        if (!softwareMode && vCodec != null && cur !== codecSurface) dropVideoCodec()
         ensureVideoCodec()
 
         // A seek whose frame never shows (no surface, slow software decode) must still complete.
@@ -626,10 +802,14 @@ class NativePlayer(
 
         if (playing || needFirstFrame) {
             try {
-                vInEos = feed(vEx, vCodec, vInEos, "video")
-                drainVideo()
+                if (softwareMode) {
+                    if (sw != 0L) swStep()
+                } else {
+                    vInEos = feed(vEx, vCodec, vInEos, "video")
+                    drainVideo()
+                }
             } catch (e: Exception) {
-                onVideoError(e)
+                if (softwareMode) onSwError(e) else onVideoError(e)
             }
         }
         if (playing) {
@@ -643,7 +823,7 @@ class NativePlayer(
         }
         val now = System.nanoTime()
         if (playing && now - lastEmitNs > 100_000_000L) emitState()
-        return playing || (needFirstFrame && vCodec != null)
+        return playing || (needFirstFrame && (vCodec != null || sw != 0L))
     }
 
     private fun feed(ex: MediaExtractor?, c: MediaCodec?, eos: Boolean, tag: String): Boolean {
@@ -848,6 +1028,7 @@ class NativePlayer(
         val audioDone = aCodec == null || aOutDone
         val videoDone = when {
             vFormat == null -> true
+            sw != 0L -> swEos && !swHave
             vCodec != null -> vOutDone && pendingV < 0
             else -> durationUs > 0 && clockUs() >= durationUs
         }
