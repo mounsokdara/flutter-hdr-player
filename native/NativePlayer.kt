@@ -23,6 +23,9 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.math.max
 
+/** No decoder on this device can handle the stream at all (not a transient failure). */
+class UnsupportedStreamException(message: String) : Exception(message)
+
 object PlayerHolder {
     @Volatile
     var player: NativePlayer? = null
@@ -388,8 +391,38 @@ class NativePlayer(
                 }
                 (if (isSoftware(info)) 2 else 0) + (if (claims) 0 else 1)
             }
+        // 10-bit HEVC (Main 10 / HDR10 / HDR10+): if no decoder lists such a profile, nothing below can work.
+        val candidatesToTry = if (mime.equals("video/hevc", true) && f.containsKey(MediaFormat.KEY_PROFILE) &&
+            f.getInteger(MediaFormat.KEY_PROFILE).let { it == 2 || it == 4096 || it == 8192 }
+        ) {
+            fun has10bit(info: MediaCodecInfo) = try {
+                info.getCapabilitiesForType(mime).profileLevels.any { it.profile == 2 || it.profile == 4096 || it.profile == 8192 }
+            } catch (ignored: Exception) {
+                false
+            }
+            val capable = candidates.filter { has10bit(it) }
+            if (capable.isEmpty()) {
+                val list = candidates.joinToString("; ") { info ->
+                    val profiles = try {
+                        info.getCapabilitiesForType(mime).profileLevels.map { it.profile }.distinct().joinToString(",") {
+                            when (it) { 1 -> "Main"; 2 -> "Main10"; 4 -> "MainStill"; 4096 -> "Main10HDR10"; 8192 -> "Main10HDR10Plus"; else -> "p$it" }
+                        }
+                    } catch (ignored: Exception) {
+                        "?"
+                    }
+                    "${info.name} (${if (isSoftware(info)) "software" else "hardware"}): $profiles"
+                }
+                throw UnsupportedStreamException(
+                    "This phone has no decoder for 10-bit HEVC (Main 10 / HDR10), which this video uses. " +
+                        "Its HEVC decoders only support: $list. A software decoder would be needed."
+                )
+            }
+            capable
+        } else {
+            candidates
+        }
         val fails = StringBuilder()
-        for (info in candidates) {
+        for (info in candidatesToTry) {
             val variants = codecConfigVariants(f, mime)
             for ((idx, fmt) in variants.withIndex()) {
                 val key = "${info.name}#$idx"
@@ -447,6 +480,10 @@ class NativePlayer(
         videoDisabled = true
         needFirstFrame = false
         finishSeek()
+        if (e is UnsupportedStreamException) {
+            emit(mapOf("type" to "error", "message" to (e.message ?: "No decoder for this video")))
+            return
+        }
         val log = if (decoderLog.isNotEmpty()) "\n" + decoderLog.toString().trim() else ""
         emit(mapOf("type" to "error", "message" to "No working video decoder: ${describe(e)}$log"))
     }
